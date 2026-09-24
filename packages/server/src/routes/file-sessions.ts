@@ -39,7 +39,7 @@ router.get('/', (req: Request, res: Response) => {
 
   const rows = queryAll<FileSessionRow>(
     `SELECT fs.id, fs.user_id, fs.connection_id, fs.protocol, fs.started_at, fs.ended_at,
-            c.name AS connection_name, u.username,
+            COALESCE(c.name, fs.connection_name) AS connection_name, COALESCE(u.username, fs.username) AS username,
             COUNT(fse.id) AS event_count
      FROM file_sessions fs
      LEFT JOIN connections c ON c.id = fs.connection_id
@@ -86,7 +86,7 @@ router.get('/:id/export', (req: Request, res: Response) => {
 
   const session = queryOne<SessionMeta>(
     `SELECT fs.user_id, fs.protocol, fs.started_at, fs.ended_at,
-            c.name AS connection_name, u.username
+            COALESCE(c.name, fs.connection_name) AS connection_name, COALESCE(u.username, fs.username) AS username
      FROM file_sessions fs
      LEFT JOIN connections c ON c.id = fs.connection_id
      LEFT JOIN users u ON u.id = fs.user_id

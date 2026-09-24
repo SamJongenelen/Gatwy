@@ -6,7 +6,7 @@ import initSqlJs from 'sql.js';
 import { requirePermission, userCan } from '../middleware/auth.js';
 import { logAudit } from '../services/audit.js';
 import { createBackup, restoreBackup, getRecordingsSizeInfo } from '../services/backup.js';
-import { getDb, restoreDbFromBytes } from '../db/index.js';
+import { restoreDbFromBytes, exportDbBytes } from '../db/index.js';
 import { config } from '../config.js';
 import { getEncryptionKeyHex } from '../services/encryption.js';
 import {
@@ -112,7 +112,7 @@ const router = Router();
 // GET /size — return estimated backup size breakdown
 router.get('/size', requirePermission('settings.backup'), (_req: Request, res: Response) => {
   try {
-    const dbSize = Buffer.from(getDb().export()).length;
+    const dbSize = Buffer.from(exportDbBytes()).length;
     const { recordingsSize, recordingCount } = getRecordingsSizeInfo();
     res.json({ dbSize, recordingsSize, recordingCount });
   } catch (e) {
@@ -128,7 +128,7 @@ router.post('/export', requirePermission('settings.backup'), (req: Request, res:
     return;
   }
   try {
-    const dbBytes = Buffer.from(getDb().export());
+    const dbBytes = Buffer.from(exportDbBytes());
     const backupBuf = createBackup(password, dbBytes, includeRecordings);
     const filename = `gatwy-backup-${new Date().toISOString().slice(0, 10)}.geb`;
     logAudit({

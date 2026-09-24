@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import type { Request } from 'express';
-import { execute } from '../db/helpers.js';
+import { execute, queryOne } from '../db/helpers.js';
 
 export type FileSessionAction = 'browse' | 'download' | 'upload' | 'mkdir' | 'delete' | 'rename' | 'chmod' | 'copy';
 
@@ -17,9 +17,14 @@ export function logFileSessionEvent(params: {
   if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 128) return;
 
   try {
+    // Cheap, single-row lookups — INSERT OR IGNORE discards them harmlessly on every
+    // call after the session's first (session_id already exists), so this only actually
+    // matters once per session, not once per browse/download/upload event.
+    const connRow = queryOne<{ name: string }>('SELECT name FROM connections WHERE id = ?', [params.connectionId]);
+    const userRow = queryOne<{ username: string }>('SELECT username FROM users WHERE id = ?', [params.userId]);
     execute(
-      `INSERT OR IGNORE INTO file_sessions (id, user_id, connection_id, protocol) VALUES (?, ?, ?, ?)`,
-      [sessionId, params.userId, params.connectionId, params.protocol],
+      `INSERT OR IGNORE INTO file_sessions (id, user_id, connection_id, protocol, username, connection_name) VALUES (?, ?, ?, ?, ?, ?)`,
+      [sessionId, params.userId, params.connectionId, params.protocol, userRow?.username ?? null, connRow?.name ?? null],
     );
     execute(
       `UPDATE file_sessions SET ended_at = datetime('now') WHERE id = ?`,

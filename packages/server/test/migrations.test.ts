@@ -60,7 +60,7 @@ describe('migration upgrade path', () => {
     const resourceSharesAfter = after.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_shares'");
     assert.equal(resourceSharesAfter.length, 1, 'resource_shares table must exist after upgrading from v21');
     const maxAfter = after.exec('SELECT MAX(version) as v FROM schema_version')[0]!.values[0]![0];
-    assert.equal(maxAfter, 23);
+    assert.equal(maxAfter, 24);
   });
 
   it('migrates real connection_shares and group_shares rows into resource_shares from a v22 database', () => {
@@ -114,7 +114,7 @@ describe('migration upgrade path', () => {
     assert.equal(oldTables.length, 0, 'connection_shares and group_shares must not survive past v23');
 
     const maxAfter = after.exec('SELECT MAX(version) as v FROM schema_version')[0]!.values[0]![0];
-    assert.equal(maxAfter, 23);
+    assert.equal(maxAfter, 24);
   });
 
   it('applies a lower-numbered migration that is missing even when a higher one is already applied', () => {
@@ -127,7 +127,7 @@ describe('migration upgrade path', () => {
     db.run('DELETE FROM schema_version WHERE version = 22');
 
     const maxBefore = db.exec('SELECT MAX(version) as v FROM schema_version')[0]!.values[0]![0];
-    assert.equal(maxBefore, 23, 'precondition: a higher version is already applied');
+    assert.equal(maxBefore, 24, 'precondition: a higher version is already applied');
     assert.equal(db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='group_shares'").length, 0);
 
     restoreDbFromBytes(Buffer.from(db.export()));
@@ -136,5 +136,196 @@ describe('migration upgrade path', () => {
     assert.equal(migrated.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='group_shares'").length, 1, 'v22 must run even though v23 is already applied');
     assert.equal(migrated.exec('SELECT COUNT(*) FROM schema_version WHERE version = 22')[0]!.values[0]![0], 1);
     assert.equal(migrated.exec('SELECT COUNT(*) FROM schema_version WHERE version = 23')[0]!.values[0]![0], 1, 'v23 must not be re-applied');
+  });
+
+  it('v5/v13/v18 connections rebuilds keep sessions/file_sessions/ssh_commands intact', () => {
+    // Same failure mode as the v24 regression below, but for three earlier migrations
+    // that rebuild `connections` itself (v5 adds 'telnet' + tags, v13 adds postgres/
+    // mysql, v18 adds moonlight — v14 only heals a database where v13's rebuild was
+    // recorded as applied but never actually ran, so starting from a clean v4-era
+    // schema it's a no-op here and never touches `connections`). Each does DROP TABLE
+    // connections to change its CHECK constraint — with foreign_keys ON, that
+    // cascade-deletes every sessions/file_sessions row referencing it (ON DELETE
+    // CASCADE), and transitively every ssh_commands/rdp_events/file_session_events row
+    // under THOSE — on any populated install that upgraded through them while carrying
+    // that history. Confirmed via `git log`/`git show`: at 18c698e (2026-03-29, when
+    // this v5 body was introduced), `applyDbPragmas` already turned foreign_keys ON
+    // before `runMigrations()` ran, with no save/export in between — so this was live
+    // and unfixed from that commit onward, until the whole migration run was wrapped in
+    // one foreign_keys OFF/ON pair (see runMigrations()) alongside the v24 fix.
+    const db = getDb();
+
+    for (const t of ['ssh_commands', 'file_session_events', 'file_sessions', 'sessions', 'connections']) {
+      db.run(`DROP TABLE IF EXISTS ${t}`);
+    }
+    // Recreate the pre-v5 (v1/v3/v4-era) shape: CASCADE FK from sessions/file_sessions
+    // to connections, and from ssh_commands to sessions.
+    db.run(`CREATE TABLE connections (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      group_id TEXT REFERENCES connection_groups(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      protocol TEXT NOT NULL CHECK(protocol IN ('ssh', 'rdp', 'smb', 'vnc', 'sftp', 'ftp')),
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL,
+      username TEXT,
+      encrypted_password TEXT,
+      private_key TEXT,
+      extra_config_json TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      recording_enabled INTEGER NOT NULL DEFAULT 1,
+      shared INTEGER NOT NULL DEFAULT 0,
+      tunnels_json TEXT,
+      host_fingerprint TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    db.run(`CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+      protocol TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT,
+      recording_path TEXT
+    )`);
+    db.run(`CREATE TABLE file_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+      protocol TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT
+    )`);
+    db.run(`CREATE TABLE ssh_commands (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      elapsed REAL NOT NULL DEFAULT 0,
+      command TEXT NOT NULL,
+      output_preview TEXT
+    )`);
+
+    // Pin at v4 (post ssh_commands, pre v5 connections rebuild) and seed real history.
+    db.run('DELETE FROM schema_version WHERE version > 4');
+    db.run(`INSERT INTO users (id, username, password_hash, display_name, role) VALUES ('u-v5-upgrade', 'v5-upgrade-user', 'x', 'V5 Upgrade User', 'user')`);
+    db.run(`INSERT INTO connections (id, user_id, name, protocol, host, port) VALUES ('c-v5-upgrade', 'u-v5-upgrade', 'V5 Upgrade Conn', 'ssh', 'h', 22)`);
+    db.run(`INSERT INTO sessions (id, user_id, connection_id, protocol) VALUES ('s-v5-upgrade', 'u-v5-upgrade', 'c-v5-upgrade', 'ssh')`);
+    db.run(`INSERT INTO file_sessions (id, user_id, connection_id, protocol) VALUES ('fs-v5-upgrade', 'u-v5-upgrade', 'c-v5-upgrade', 'sftp')`);
+    db.run(`INSERT INTO ssh_commands (id, session_id, command) VALUES ('cmd-v5-upgrade', 's-v5-upgrade', 'ls -la')`);
+
+    const bytes = Buffer.from(db.export());
+    restoreDbFromBytes(bytes);
+    const migrated = getDb();
+
+    const count = (sql: string) => (migrated.exec(sql)[0]?.values[0]?.[0] as number) ?? 0;
+    assert.equal(count(`SELECT COUNT(*) FROM sessions WHERE id = 's-v5-upgrade'`), 1, 'sessions must survive the v5/v13/v18 connections rebuilds');
+    assert.equal(count(`SELECT COUNT(*) FROM file_sessions WHERE id = 'fs-v5-upgrade'`), 1, 'file_sessions must survive the v5/v13/v18 connections rebuilds');
+    assert.equal(count(`SELECT COUNT(*) FROM ssh_commands WHERE id = 'cmd-v5-upgrade'`), 1, 'ssh_commands must survive transitively (its parent session must survive first)');
+  });
+
+  it('v24 rebuild keeps ssh_commands/rdp_events/file_session_events intact and backfills username/connection_name', () => {
+    // Simulate a real, populated install upgrading from v22: recreate sessions/
+    // file_sessions/db_query_history with their OLD (CASCADE-FK, no snapshot columns)
+    // shape, seed real history under them, then let v24 run for real via
+    // restoreDbFromBytes. A naive rebuild (DROP TABLE with foreign_keys still ON)
+    // cascade-deletes ssh_commands/rdp_events/file_session_events the moment the parent
+    // table is dropped, before it's even recreated — this is the regression guard for
+    // that specific failure mode, not just a schema/shape check.
+    const db = getDb();
+
+    for (const t of ['ssh_commands', 'rdp_events', 'file_session_events', 'db_query_history', 'file_sessions', 'sessions']) {
+      db.run(`DROP TABLE IF EXISTS ${t}`);
+    }
+    db.run(`CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+      protocol TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT,
+      recording_path TEXT
+    )`);
+    db.run(`CREATE TABLE file_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+      protocol TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT
+    )`);
+    db.run(`CREATE TABLE db_query_history (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+      query_text TEXT NOT NULL,
+      row_count INTEGER,
+      duration_ms INTEGER,
+      error TEXT,
+      executed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    db.run(`CREATE TABLE ssh_commands (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      elapsed REAL NOT NULL DEFAULT 0,
+      command TEXT NOT NULL,
+      output_preview TEXT
+    )`);
+    db.run(`CREATE TABLE rdp_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      elapsed REAL NOT NULL,
+      event_type TEXT NOT NULL CHECK(event_type IN ('click', 'key', 'move'))
+    )`);
+    db.run(`CREATE TABLE file_session_events (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES file_sessions(id) ON DELETE CASCADE,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      action TEXT NOT NULL,
+      path TEXT NOT NULL,
+      detail_json TEXT
+    )`);
+
+    db.run(`INSERT INTO users (id, username, password_hash, display_name, role) VALUES ('u-v24-upgrade', 'v24-upgrade-user', 'x', 'V24 Upgrade User', 'user')`);
+    db.run(`INSERT INTO connections (id, user_id, name, protocol, host, port) VALUES ('c-v24-upgrade', 'u-v24-upgrade', 'V24 Upgrade Conn', 'ssh', 'h', 22)`);
+    db.run(`INSERT INTO sessions (id, user_id, connection_id, protocol) VALUES ('s-v24-upgrade', 'u-v24-upgrade', 'c-v24-upgrade', 'ssh')`);
+    db.run(`INSERT INTO ssh_commands (id, session_id, command) VALUES ('cmd-v24-upgrade', 's-v24-upgrade', 'ls -la')`);
+    db.run(`INSERT INTO rdp_events (session_id, elapsed, event_type) VALUES ('s-v24-upgrade', 1.5, 'click')`);
+    db.run(`INSERT INTO file_sessions (id, user_id, connection_id, protocol) VALUES ('fs-v24-upgrade', 'u-v24-upgrade', 'c-v24-upgrade', 'sftp')`);
+    db.run(`INSERT INTO file_session_events (id, session_id, action, path) VALUES ('evt-v24-upgrade', 'fs-v24-upgrade', 'browse', '/')`);
+    db.run(`INSERT INTO db_query_history (id, user_id, connection_id, query_text) VALUES ('q-v24-upgrade', 'u-v24-upgrade', 'c-v24-upgrade', 'SELECT 1')`);
+
+    db.run('DELETE FROM schema_version WHERE version > 22');
+
+    const bytes = Buffer.from(db.export());
+    restoreDbFromBytes(bytes);
+    const migrated = getDb();
+
+    const count = (sql: string) => (migrated.exec(sql)[0]?.values[0]?.[0] as number) ?? 0;
+    assert.equal(count(`SELECT COUNT(*) FROM ssh_commands WHERE session_id = 's-v24-upgrade'`), 1, 'ssh_commands must survive the sessions table rebuild');
+    assert.equal(count(`SELECT COUNT(*) FROM rdp_events WHERE session_id = 's-v24-upgrade'`), 1, 'rdp_events must survive the sessions table rebuild');
+    assert.equal(count(`SELECT COUNT(*) FROM file_session_events WHERE session_id = 'fs-v24-upgrade'`), 1, 'file_session_events must survive the file_sessions table rebuild');
+
+    const sessionRow = migrated.exec(`SELECT username, connection_name FROM sessions WHERE id = 's-v24-upgrade'`)[0]!.values[0]!;
+    assert.deepEqual(sessionRow, ['v24-upgrade-user', 'V24 Upgrade Conn'], 'sessions row must be backfilled from the still-live user/connection');
+
+    const fileSessionRow = migrated.exec(`SELECT username, connection_name FROM file_sessions WHERE id = 'fs-v24-upgrade'`)[0]!.values[0]!;
+    assert.deepEqual(fileSessionRow, ['v24-upgrade-user', 'V24 Upgrade Conn']);
+
+    const historyRow = migrated.exec(`SELECT username, connection_name FROM db_query_history WHERE id = 'q-v24-upgrade'`)[0]!.values[0]!;
+    assert.deepEqual(historyRow, ['v24-upgrade-user', 'V24 Upgrade Conn']);
+
+    assert.equal(migrated.exec('PRAGMA foreign_keys')[0]!.values[0]![0], 1, 'foreign_keys must be back ON after the migration, not left OFF');
+    assert.equal(migrated.exec('PRAGMA foreign_key_list(sessions)').length, 0, 'sessions must have no FK left on user_id/connection_id');
+
+    // The children's own FK (ssh_commands/rdp_events -> sessions.id) must still point at
+    // the rebuilt table and still fire: the RENAME under foreign_keys=OFF must not have
+    // left them referencing a table that no longer exists.
+    migrated.run(`DELETE FROM sessions WHERE id = 's-v24-upgrade'`);
+    assert.equal(count(`SELECT COUNT(*) FROM ssh_commands WHERE session_id = 's-v24-upgrade'`), 0, 'ssh_commands must still cascade off the rebuilt sessions table');
+    assert.equal(count(`SELECT COUNT(*) FROM rdp_events WHERE session_id = 's-v24-upgrade'`), 0, 'rdp_events must still cascade off the rebuilt sessions table');
+    migrated.run(`DELETE FROM file_sessions WHERE id = 'fs-v24-upgrade'`);
+    assert.equal(count(`SELECT COUNT(*) FROM file_session_events WHERE session_id = 'fs-v24-upgrade'`), 0, 'file_session_events must still cascade off the rebuilt file_sessions table');
   });
 });

@@ -17,12 +17,14 @@ export function startDbSession(
   userId: string,
   connectionId: string,
   protocol: 'postgres' | 'mysql',
+  username: string,
+  connectionName: string,
 ): string {
   const sessionId = uuid();
   try {
     execute(
-      `INSERT INTO file_sessions (id, user_id, connection_id, protocol) VALUES (?, ?, ?, ?)`,
-      [sessionId, userId, connectionId, protocol],
+      `INSERT INTO file_sessions (id, user_id, connection_id, protocol, username, connection_name) VALUES (?, ?, ?, ?, ?, ?)`,
+      [sessionId, userId, connectionId, protocol, username, connectionName],
     );
   } catch (err) {
     console.error('[DbSession] Failed to start session:', err);

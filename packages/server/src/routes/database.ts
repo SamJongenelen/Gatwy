@@ -17,6 +17,7 @@ router.use('/:connectionId', requireDbPermission);
 
 interface ConnRow {
   id: string;
+  name: string;
   protocol: 'postgres' | 'mysql';
   user_id: string;
   shared: number;
@@ -25,7 +26,7 @@ interface ConnRow {
 function getConn(connectionId: string, req: Request): ConnRow | undefined {
   const access = connectionAccessWhere('c', req.user!.userId, req.user!.role);
   return queryOne<ConnRow>(
-    `SELECT c.id, c.protocol, c.user_id, c.shared FROM connections c
+    `SELECT c.id, c.name, c.protocol, c.user_id, c.shared FROM connections c
      WHERE c.id = ? AND c.protocol IN ('postgres','mysql') AND ${access.where}`,
     [connectionId, ...access.params],
   );
@@ -80,7 +81,7 @@ router.post('/:connectionId/connect', async (req: Request, res: Response) => {
     // Re-use existing session if already connected
     let sessionId = sessions.get(connectionId);
     if (!sessionId) {
-      sessionId = startDbSession(userId, connectionId, conn.protocol);
+      sessionId = startDbSession(userId, connectionId, conn.protocol, req.user!.username, conn.name);
       sessions.set(connectionId, sessionId);
     }
     logAudit({ userId, eventType: 'db.connect', target: connectionId, details: { protocol: conn.protocol } });
@@ -399,9 +400,9 @@ router.post('/:connectionId/query', async (req: Request, res: Response) => {
 
     if (!connectionLost) {
       execute(
-        `INSERT INTO db_query_history (id, user_id, connection_id, query_text, row_count, duration_ms, error, executed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-        [uuid(), userId, connectionId, queryText.slice(0, 10000), error ? null : totalRows || rowCount, durationMs, error ?? null],
+        `INSERT INTO db_query_history (id, user_id, connection_id, query_text, row_count, duration_ms, error, executed_at, username, connection_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
+        [uuid(), userId, connectionId, queryText.slice(0, 10000), error ? null : totalRows || rowCount, durationMs, error ?? null, req.user!.username, conn.name],
       );
       const sessionId = getUserSessions(userId).get(connectionId);
       if (sessionId) {

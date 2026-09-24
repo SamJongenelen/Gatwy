@@ -20,12 +20,29 @@ export function getDb(): Database {
 }
 
 /**
+ * Serializes the live connection to bytes — use this everywhere instead of calling
+ * `.export()` directly on `getDb()`. sql.js resets connection-level PRAGMAs as a side
+ * effect of `export()` (confirmed for both of these: `journal_mode` reverts to its
+ * default 'delete', and — the one that actually matters for data integrity —
+ * `foreign_keys` reverts to OFF, silently disabling every `ON DELETE CASCADE`/`SET NULL`
+ * in the schema from that call until the next `applyDbPragmas`). Every direct
+ * `getDb().export()` call site had this same bug (backup size estimate, backup download,
+ * auto-backup) — routing all of them through here, not just the autosave path in
+ * `saveDb()`, is what actually closes the gap.
+ */
+export function exportDbBytes(): Uint8Array {
+  const data = db.export();
+  applyDbPragmas(db);
+  return data;
+}
+
+/**
  * Crash-safe persist: write the full sql.js export to a temp file in the same
  * directory, fsync, then rename over the destination (atomic on the same FS).
  * Never truncates the primary DB mid-write if the process is killed.
  */
 function saveDb(): void {
-  const data = db.export();
+  const data = exportDbBytes();
   const buffer = Buffer.from(data);
   const dbPath = config.dbPath;
   const tmpPath = `${dbPath}.${process.pid}.tmp`;
@@ -1044,17 +1061,162 @@ function runMigrations() {
         DROP TABLE group_shares;
       `,
     },
+    {
+      // NOTE: numbered 24, not 23 — PR #60 (feat/folder-sharing-collaboration, already
+      // merged) claims v23 for its resource_shares table,
+      // and schema_version.version is a primary key: two migrations with the same number
+      // would fail a fresh install's very first startup. Merge ORDER does not matter
+      // (runMigrations gates on the set of applied versions, so #60's v23 still runs on
+      // an install that already has this v24) — but do NOT renumber this migration once
+      // it has shipped: re-running the rebuild below would overwrite every existing
+      // username/connection_name snapshot with the LEFT JOIN's live value, i.e. NULL for
+      // any user/connection deleted since.
+      version: 24,
+      run: (database: Database) => {
+        // sessions / file_sessions / db_query_history keep user_id/connection_id as plain
+        // TEXT — no FK, so no ON DELETE CASCADE — instead of REFERENCES ... ON DELETE
+        // CASCADE. Foreign key enforcement WAS active on these two tables, but only in a
+        // narrow window: `applyDbPragmas` turns it ON at every startup, before
+        // `runMigrations()` runs, and it stayed on in memory until the first save (sql.js
+        // silently drops PRAGMA foreign_keys on every db.export(), i.e. every autosave —
+        // see db/index.ts saveDb()/exportDbBytes()). Closing that gap (this migration's
+        // whole reason to exist) would otherwise CASCADE-delete this history the moment
+        // its owning user or connection is deleted. That's wrong for session/query
+        // history specifically:
+        // GET /sessions, GET /file-sessions and the export routes already LEFT JOIN
+        // connections/users expecting the other side might be gone, and DELETE /sessions
+        // explicitly unlinks recording files off disk before removing rows — a silent
+        // cascade would bypass that and leave orphaned recording files behind, and would
+        // erase another user's own session history off a connection the deleter doesn't
+        // even own. ssh_commands/rdp_events/file_session_events are unaffected: they hang
+        // off session_id (unchanged, no FK loss there), not off user_id/connection_id.
+        //
+        // The new username/connection_name columns snapshot the readable names at the
+        // moment each row is created (routes/sessions.ts, ws/sshProxy.ts, ws/telnetProxy.ts,
+        // services/dbSession.ts), so "who" and "where" stay legible even once the live
+        // row is gone — the LEFT JOIN'd live name is preferred when it's still there,
+        // this snapshot is the fallback (see the updated SELECTs in routes/sessions.ts
+        // and routes/file-sessions.ts). Backfilled here from the still-live users/
+        // connections rows for every pre-existing history row, via the same LEFT JOIN,
+        // so upgrading an install with real history doesn't blank "who"/"where" for
+        // everything that happened before this migration.
+        //
+        // (No PRAGMA foreign_keys handling here — the whole migration run is wrapped in
+        // one OFF/ON pair at the bottom of runMigrations(), see the comment there.)
+        database.run(`CREATE TABLE sessions_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          connection_id TEXT NOT NULL,
+          protocol TEXT NOT NULL,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at TEXT,
+          recording_path TEXT,
+          username TEXT,
+          connection_name TEXT
+        )`);
+        database.run(`INSERT INTO sessions_new (id, user_id, connection_id, protocol, started_at, ended_at, recording_path, username, connection_name)
+          SELECT s.id, s.user_id, s.connection_id, s.protocol, s.started_at, s.ended_at, s.recording_path, u.username, c.name
+          FROM sessions s
+          LEFT JOIN users u ON u.id = s.user_id
+          LEFT JOIN connections c ON c.id = s.connection_id`);
+        database.run('DROP TABLE sessions');
+        database.run('ALTER TABLE sessions_new RENAME TO sessions');
+        database.run('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
+
+        database.run(`CREATE TABLE file_sessions_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          connection_id TEXT NOT NULL,
+          protocol TEXT NOT NULL,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at TEXT,
+          username TEXT,
+          connection_name TEXT
+        )`);
+        database.run(`INSERT INTO file_sessions_new (id, user_id, connection_id, protocol, started_at, ended_at, username, connection_name)
+          SELECT fs.id, fs.user_id, fs.connection_id, fs.protocol, fs.started_at, fs.ended_at, u.username, c.name
+          FROM file_sessions fs
+          LEFT JOIN users u ON u.id = fs.user_id
+          LEFT JOIN connections c ON c.id = fs.connection_id`);
+        database.run('DROP TABLE file_sessions');
+        database.run('ALTER TABLE file_sessions_new RENAME TO file_sessions');
+        database.run('CREATE INDEX IF NOT EXISTS idx_file_sessions_user ON file_sessions(user_id)');
+
+        database.run(`CREATE TABLE db_query_history_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          connection_id TEXT NOT NULL,
+          query_text TEXT NOT NULL,
+          row_count INTEGER,
+          duration_ms INTEGER,
+          error TEXT,
+          executed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          username TEXT,
+          connection_name TEXT
+        )`);
+        database.run(`INSERT INTO db_query_history_new (id, user_id, connection_id, query_text, row_count, duration_ms, error, executed_at, username, connection_name)
+          SELECT h.id, h.user_id, h.connection_id, h.query_text, h.row_count, h.duration_ms, h.error, h.executed_at, u.username, c.name
+          FROM db_query_history h
+          LEFT JOIN users u ON u.id = h.user_id
+          LEFT JOIN connections c ON c.id = h.connection_id`);
+        database.run('DROP TABLE db_query_history');
+        database.run('ALTER TABLE db_query_history_new RENAME TO db_query_history');
+        database.run('CREATE INDEX IF NOT EXISTS idx_db_query_history_user_conn ON db_query_history(user_id, connection_id)');
+        database.run('CREATE INDEX IF NOT EXISTS idx_db_query_history_executed ON db_query_history(executed_at)');
+      },
+    },
   ];
 
-  for (const migration of migrations) {
-    if (!applied.has(migration.version)) {
-      if (migration.sql) {
-        db.run(migration.sql);
-      } else if (migration.run) {
-        migration.run(db);
+  // Several migrations (v5, v13, v14, v18, v24) rebuild a table via CREATE-new/
+  // INSERT-SELECT/DROP-old/RENAME — the only way SQLite lets you change a CHECK
+  // constraint or drop a column. With `foreign_keys` ON (the normal running state, see
+  // applyDbPragmas), DROP TABLE performs an implicit DELETE FROM over every row of the
+  // table being dropped, cascading away any child rows that reference it via ON DELETE
+  // CASCADE — before the table is even recreated. Confirmed empirically for both the
+  // sessions/file_sessions rebuild in v24 and the connections rebuild in v5: on a
+  // seeded database (see the two regression tests in migrations.test.ts), each
+  // cascade-deletes the other table's history the moment the DROP runs — the same
+  // would happen on any real install carrying that history through the upgrade.
+  // Wrapping the *entire* migration run below, rather than each rebuild
+  // individually, means a future migration that does the same kind of rebuild is
+  // protected automatically, without relying on its author remembering to do this —
+  // none of the migrations above rely on a CASCADE/SET NULL actually firing as part of
+  // their own logic (checked: none of them DELETE/UPDATE a row expecting side effects
+  // on a related table), so disabling enforcement for the whole run changes nothing
+  // else. runMigrations() has no surrounding transaction, so toggling the pragma here
+  // is not a no-op (SQLite only refuses to change it inside one).
+  db.run('PRAGMA foreign_keys = OFF');
+  try {
+    for (const migration of migrations) {
+      if (!applied.has(migration.version)) {
+        if (migration.sql) {
+          db.run(migration.sql);
+        } else if (migration.run) {
+          migration.run(db);
+        }
+        db.run('INSERT INTO schema_version (version) VALUES (?)', [migration.version]);
+        console.log(`[DB] Applied migration v${migration.version}`);
       }
-      db.run('INSERT INTO schema_version (version) VALUES (?)', [migration.version]);
-      console.log(`[DB] Applied migration v${migration.version}`);
     }
+  } finally {
+    // If a migration threw because the connection itself is unusable, this would throw
+    // too and mask the original error — let that one propagate instead.
+    try { db.run('PRAGMA foreign_keys = ON'); } catch { /* connection unusable; original error propagates */ }
+  }
+
+  // Enforcement was effectively off for the app's whole life before exportDbBytes(), so
+  // any database that has been through a user/group/connection delete before this
+  // release almost certainly carries orphaned child rows. They are harmless (SQLite only
+  // checks a FK when that column is written) and are never auto-cleaned, so surface them
+  // once per startup/restore — otherwise an operator has no way to explain them.
+  const violations = db.exec('PRAGMA foreign_key_check');
+  if (violations.length > 0 && violations[0].values.length > 0) {
+    const perTable = new Map<string, number>();
+    for (const row of violations[0].values) {
+      const table = String(row[0]);
+      perTable.set(table, (perTable.get(table) ?? 0) + 1);
+    }
+    const summary = [...perTable.entries()].map(([t, n]) => `${t}=${n}`).join(', ');
+    console.warn(`[DB] foreign_key_check: ${violations[0].values.length} orphaned row(s) reference a missing parent (${summary}) — pre-existing data left behind while FK enforcement was inactive; not modified.`);
   }
 }

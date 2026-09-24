@@ -304,9 +304,16 @@ export function setupTelnetProxy(server: https.Server): void {
     const globalRecording = getSetting('session.recording_enabled') === 'true';
     const doRecord = globalRecording && conn.recording_enabled === 1;
 
+    // Wrapped: this runs inside a raw 'connection' event handler, not an Express route,
+    // so an unguarded throw here isn't caught by anything and would crash the process.
     if (doRecord) {
-      execute('INSERT INTO sessions (id, user_id, connection_id, protocol) VALUES (?, ?, ?, ?)',
-        [sessionDbId, userId, connectionId, 'telnet']);
+      try {
+        const actingUser = queryOne<{ username: string }>('SELECT username FROM users WHERE id = ?', [userId]);
+        execute('INSERT INTO sessions (id, user_id, connection_id, protocol, username, connection_name) VALUES (?, ?, ?, ?, ?, ?)',
+          [sessionDbId, userId, connectionId, 'telnet', actingUser?.username ?? null, conn.name]);
+      } catch (err) {
+        console.error('[telnetProxy] Failed to create session record:', err);
+      }
     }
     logAudit({
       userId, eventType: 'session.telnet.connect',
