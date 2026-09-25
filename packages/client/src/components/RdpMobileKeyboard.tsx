@@ -3,7 +3,7 @@ import { useMemo, useRef, useState, useCallback } from 'react';
 // ─── Char → keyboard code mapping ─────────────────────────────────────────────
 // Maps a printable character to the US-QWERTY KeyboardEvent.code and whether
 // Shift is required.  These codes match the CODE_TO_SCANCODE table in
-// RdpSession.tsx, so the RDP handler will produce the correct scancode.
+// lib/rdpKeyboard.ts, so the RDP handler will produce the correct scancode.
 
 interface KeyInfo { code: string; shift: boolean }
 
