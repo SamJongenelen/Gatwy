@@ -120,101 +120,109 @@ export function FolderShareModal({ groupId, groupName, onClose, onSaved }: Folde
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-surface-alt border border-border rounded-lg shadow-xl w-full max-w-sm max-h-[85vh] flex flex-col overflow-hidden"
+        className="bg-surface-alt border border-border rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="px-5 pt-4 pb-2 border-b border-border">
-          <h2 className="text-base font-bold text-text-primary">Share Folder</h2>
-          <p className="text-xs text-text-secondary mt-0.5">
-            "{groupName}" — sub-folders, connections, and their <strong className="font-semibold text-text-primary">credentials</strong> are
-            included, now and later.
-          </p>
+        <div className="px-5 pt-4 pb-3 border-b border-border">
+          <h2 className="text-base font-bold text-text-primary">Share "{groupName}"</h2>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-          <div className="rounded border border-border bg-surface px-3 py-2">
-            <p className="text-[11px] text-text-secondary">
-              Recipients get full connect access to every connection in this folder —
-              including stored usernames and passwords/keys — not just the connection list.
-              Credentials linked to a private Credential Library entry are the one exception
-              (see below if this folder has any).
-            </p>
-            <p className="text-[11px] text-text-secondary mt-1.5">
-              <span className="font-medium text-text-primary">Viewer</span>: can connect and see the contents.{' '}
-              <span className="font-medium text-text-primary">Editor</span>: can also create, edit, reorder, and
-              delete connections and sub-folders inside it — new items stay owned by you, and editors can never
-              rename/delete this folder itself or manage its sharing.
-            </p>
-          </div>
-
-          {loading ? (
-            <p className="text-xs text-text-secondary">Loading…</p>
-          ) : (
-            <>
-              <div>
-                <label className="block text-[10px] font-medium text-text-secondary mb-1">Share with roles</label>
-                <div className="space-y-1">
-                  {shareRoles.map(r => (
-                    <div key={r.id} className="flex items-center gap-2">
-                      <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
-                        <input
-                          type="checkbox"
-                          checked={r.id in roleCapabilities}
-                          onChange={() => toggleShare('role', r.id)}
-                          className="accent-accent"
-                        />
-                        <span className="text-xs text-text-primary truncate">{r.name}</span>
-                      </label>
-                      {r.id in roleCapabilities && (
-                        <CapabilityToggle value={roleCapabilities[r.id]} onChange={(cap) => setCapability('role', r.id, cap)} />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-medium text-text-secondary mb-1">Share with users</label>
-                <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {shareUsers.map(u => (
-                    <div key={u.id} className="flex items-center gap-2">
-                      <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
-                        <input
-                          type="checkbox"
-                          checked={u.id in userCapabilities}
-                          onChange={() => toggleShare('user', u.id)}
-                          className="accent-accent"
-                        />
-                        <span className="text-xs text-text-primary truncate">{u.username}</span>
-                      </label>
-                      {u.id in userCapabilities && (
-                        <CapabilityToggle value={userCapabilities[u.id]} onChange={(cap) => setCapability('user', u.id, cap)} />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
-
-          {warnings && warnings.length > 0 && (
-            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2">
-              <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
-                {warnings.length} connection{warnings.length === 1 ? '' : 's'} won't work for recipients:
-              </p>
-              <ul className="mt-1 text-xs text-text-secondary list-disc list-inside">
-                {warnings.map(w => <li key={w.connectionId}>{w.connectionName}</li>)}
-              </ul>
-              <p className="mt-1 text-[11px] text-text-secondary">
-                They use a private credential from your Credential Library — mark it as shared, or recipients will see no credentials at all.
+        <div className="flex-1 flex overflow-hidden">
+          <aside className="hidden sm:block w-52 shrink-0 border-r border-border bg-surface px-4 py-4 overflow-y-auto space-y-4">
+            <div>
+              <p className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1">What's included</p>
+              <p className="text-[11px] text-text-primary leading-snug">
+                Sub-folders, connections, and their stored credentials.
               </p>
             </div>
-          )}
+            <div>
+              <p className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1">Viewer</p>
+              <p className="text-[11px] text-text-primary leading-snug">Can connect and view contents.</p>
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1">Editor</p>
+              <p className="text-[11px] text-text-primary leading-snug">
+                Can also add, edit, and delete items inside — never this folder itself or its sharing.
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1">Exception</p>
+              <p className="text-[11px] text-text-primary leading-snug">
+                Private Credential Library entries stay hidden unless shared separately.
+              </p>
+            </div>
+          </aside>
 
-          {error && <p className="text-red-500 text-xs">{error}</p>}
+          <div className="flex-1 min-w-0 overflow-y-auto px-5 py-4 space-y-3">
+            {loading ? (
+              <p className="text-xs text-text-secondary">Loading…</p>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-[10px] font-medium text-text-secondary mb-1">Share with roles</label>
+                  <div className="space-y-1">
+                    {shareRoles.map(r => (
+                      <div key={r.id} className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={r.id in roleCapabilities}
+                            onChange={() => toggleShare('role', r.id)}
+                            className="accent-accent"
+                          />
+                          <span className="text-xs text-text-primary truncate">{r.name}</span>
+                        </label>
+                        {r.id in roleCapabilities && (
+                          <CapabilityToggle value={roleCapabilities[r.id]} onChange={(cap) => setCapability('role', r.id, cap)} />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-medium text-text-secondary mb-1">Share with users</label>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {shareUsers.map(u => (
+                      <div key={u.id} className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={u.id in userCapabilities}
+                            onChange={() => toggleShare('user', u.id)}
+                            className="accent-accent"
+                          />
+                          <span className="text-xs text-text-primary truncate">{u.username}</span>
+                        </label>
+                        {u.id in userCapabilities && (
+                          <CapabilityToggle value={userCapabilities[u.id]} onChange={(cap) => setCapability('user', u.id, cap)} />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {warnings && warnings.length > 0 && (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
+                  {warnings.length} connection{warnings.length === 1 ? '' : 's'} won't work for recipients:
+                </p>
+                <ul className="mt-1 text-xs text-text-secondary list-disc list-inside">
+                  {warnings.map(w => <li key={w.connectionId}>{w.connectionName}</li>)}
+                </ul>
+                <p className="mt-1 text-[11px] text-text-secondary">
+                  They use a private credential from your Credential Library — mark it as shared, or recipients will see no credentials at all.
+                </p>
+              </div>
+            )}
+
+            {error && <p className="text-red-500 text-xs">{error}</p>}
+          </div>
         </div>
 
-        <div className="flex gap-2 px-5 pb-4 pt-1">
+        <div className="flex gap-2 px-5 pb-4 pt-3 border-t border-border">
           <button
             type="button"
             onClick={onClose}
