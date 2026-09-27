@@ -1105,6 +1105,14 @@ router.put('/groups/:id', (req: Request, res: Response) => {
   const editorAccess = !isOwner && !canEditAny && canEditOwn && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
   if (!isOwner && !canEditAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
 
+  // A folder can never be reparented under itself or one of its own descendants — that
+  // would detach the whole subtree into an unreachable cycle. Applies to everyone, not
+  // just editors: this predates folder collaboration, but collaborators can now trigger it too.
+  if (parentId && (parentId === id || allDescendantGroupIdsUnscoped(id).includes(parentId))) {
+    res.status(400).json({ error: 'Cannot move a folder into itself or one of its own sub-folders' });
+    return;
+  }
+
   // A group's parent must belong to the same owner as the group itself — not the caller —
   // otherwise an `edit_any` admin reparenting someone else's group under their own folder
   // (or the owner/an editor reparenting under a folder shared to them) grafts it into that share.
