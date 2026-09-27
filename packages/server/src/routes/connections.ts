@@ -520,6 +520,14 @@ router.post('/', (req: Request, res: Response) => {
   // even at creation time. Silently ignored, not an error, same as PUT /:id.
   const effectiveShared = actingAsEditor ? false : !!shared;
 
+  // A connection an editor creates is inherently visible to the whole shared folder even
+  // though `effectiveShared` above is forced false (that only guards the global-share
+  // flag). For credential-assignability purposes it must be treated as shared regardless —
+  // otherwise an editor could link the folder OWNER's own private library credential to a
+  // connection whose host/port they fully control, then wait for the owner to connect and
+  // leak it. See the matching retarget guard in PUT /:id.
+  const credentialConnectionShared = actingAsEditor ? true : effectiveShared;
+
   if (blockedSharedCreate(req, effectiveShared)) {
     res.status(403).json({ error: 'Sharing permission required' });
     return;
@@ -542,7 +550,7 @@ router.post('/', (req: Request, res: Response) => {
     // Validated against the folder OWNER, not the caller — an editor linking their own
     // private library credential gets the same hard block the owner would ("Credential
     // not found"), since the row this creates belongs to the owner either way.
-    const err = checkCredentialAssignable(credentialId, ownerId, effectiveShared, userCan(req, 'credentials.use_shared'));
+    const err = checkCredentialAssignable(credentialId, ownerId, credentialConnectionShared, userCan(req, 'credentials.use_shared'));
     if (err) { res.status(400).json({ error: err }); return; }
   }
   const inlineKey = credentialId ? { key: null } : prepareInlineKey(privateKey);
@@ -602,13 +610,16 @@ router.put('/reorder', (req: Request, res: Response) => {
   const { items } = req.body as { items?: { id: string; sortOrder: number }[] };
   if (!Array.isArray(items)) { res.status(400).json({ error: 'items array is required' }); return; }
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   for (const item of items) {
     const conn = queryOne<{ user_id: string; group_id: string | null }>(
       'SELECT user_id, group_id FROM connections WHERE id = ?', [item.id],
     );
     if (!conn) continue;
     const isOwner = conn.user_id === userId;
-    const editorAccess = !isOwner && !!conn.group_id && canWriteSharedGroup(conn.group_id, userId, role);
+    // Same base RBAC floor as PUT /:id — an editor share never substitutes for the base
+    // connections.edit_own permission.
+    const editorAccess = !isOwner && !canEditAny && canEditOwn && !!conn.group_id && canWriteSharedGroup(conn.group_id, userId, role);
     if (!isOwner && !canEditAny && !editorAccess) continue;
     execute('UPDATE connections SET sort_order = ? WHERE id = ?', [item.sortOrder, item.id]);
   }
@@ -633,10 +644,12 @@ router.put('/:id', (req: Request, res: Response) => {
     shared: number;
     extra_config_json: string | null;
     credential_id: string | null;
+    encrypted_password: string | null;
+    private_key: string | null;
   }
 
   const existing = queryOne<ExistingConnectionRow>(
-    'SELECT id, name, protocol, host, port, username, group_id, user_id, shared, extra_config_json, credential_id FROM connections WHERE id = ?',
+    'SELECT id, name, protocol, host, port, username, group_id, user_id, shared, extra_config_json, credential_id, encrypted_password, private_key FROM connections WHERE id = ?',
     [id],
   );
   if (!existing) {
@@ -689,6 +702,25 @@ router.put('/:id', (req: Request, res: Response) => {
     return;
   }
 
+  // An editor may never repoint a connection that already carries stored credentials — a
+  // private (non-shared) library credential, or any inline password/private key — at a
+  // different host/port/protocol. applyCredential resolves that secret for the OWNER, so
+  // retargeting it would let an editor redirect the owner's real saved credential to a
+  // server they control, the next time the owner opens what looks like their own connection.
+  if (editorAccess && (host !== undefined || port !== undefined || protocol !== undefined)) {
+    const linkedCredential = existing.credential_id
+      ? queryOne<{ shared: number }>('SELECT shared FROM credentials WHERE id = ?', [existing.credential_id])
+      : null;
+    const hasPrivateCredential = !!existing.credential_id && (!linkedCredential || linkedCredential.shared !== 1);
+    const hasInlineSecret = !!existing.encrypted_password || !!existing.private_key;
+    if (hasPrivateCredential || hasInlineSecret) {
+      res.status(400).json({
+        error: 'Editors cannot change the host, port, or protocol of a connection that has stored credentials. Clear the saved credentials first, or ask the owner to make this change.',
+      });
+      return;
+    }
+  }
+
   // A connection can only be filed under a folder its owner owns — otherwise it could be
   // planted into a folder shared to the owner, surfacing it to everyone that folder is shared with.
   if (groupId && !groupOwnedBy(groupId, existing.user_id)) {
@@ -698,10 +730,17 @@ router.put('/:id', (req: Request, res: Response) => {
   // An editor's reparenting is scoped to sub-folders of the SAME shared folder they were
   // granted edit access to — canWriteSharedGroup alone only proves the target is writable
   // by this editor, not that it's the same branch: an editor holding two independent
-  // edit-shares from the same owner could otherwise use one to reach into the other.
-  if (groupId && editorAccess && !sameSharedBranch(existing.group_id!, groupId, userId, role)) {
-    res.status(400).json({ error: 'Invalid folder' });
-    return;
+  // edit-shares from the same owner could otherwise use one to reach into the other. Gated
+  // on `groupId !== undefined` (not just truthy `groupId`) so an editor can't bypass this by
+  // passing `groupId: null` — silently un-filing the connection to the owner's root, out of
+  // sight of every other collaborator, is exactly the kind of move this guard exists to stop.
+  if (editorAccess && groupId !== undefined) {
+    const targetGroupId = groupId || null;
+    const stillInBranch = targetGroupId !== null && sameSharedBranch(existing.group_id!, targetGroupId, userId, role);
+    if (!stillInBranch) {
+      res.status(400).json({ error: 'Invalid folder' });
+      return;
+    }
   }
 
   // Validate the credential the connection will use after this update — a newly
@@ -711,7 +750,10 @@ router.put('/:id', (req: Request, res: Response) => {
   // credential must get the same hard block the owner would.
   const nextCredentialId: string | null = credentialId !== undefined ? (credentialId || null) : existing.credential_id;
   if (nextCredentialId && (credentialId !== undefined || shared !== undefined)) {
-    const nextShared = isConnectionShared(id, shared !== undefined ? !!shared : existing.shared);
+    // An editor's connection is inherently shared for this purpose (see the retarget guard
+    // above) — never let it fall through to the connection's own (possibly false) shared
+    // state, or an editor could still link the owner's private credential via this path.
+    const nextShared = editorAccess ? true : isConnectionShared(id, shared !== undefined ? !!shared : existing.shared);
     const err = checkCredentialAssignable(nextCredentialId, existing.user_id, nextShared, userCan(req, 'credentials.use_shared'));
     if (err) { res.status(400).json({ error: err }); return; }
   }
@@ -979,13 +1021,18 @@ router.put('/groups/reorder', (req: Request, res: Response) => {
   const { items } = req.body as { items?: { id: string; sortOrder: number }[] };
   if (!Array.isArray(items)) { res.status(400).json({ error: 'items array is required' }); return; }
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   for (const item of items) {
     const group = queryOne<{ user_id: string }>(
       'SELECT user_id FROM connection_groups WHERE id = ?', [item.id],
     );
     if (!group) continue;
     const isOwner = group.user_id === userId;
-    const editorAccess = !isOwner && canWriteSharedGroup(item.id, userId, role);
+    // Same base RBAC floor and isSharedGroup exclusion as PUT /groups/:id — reordering is
+    // a smaller action than renaming, but an editor share still shouldn't substitute for
+    // connections.edit_own, and an independently-shared sub-folder in this batch is still
+    // not this editor's to touch.
+    const editorAccess = !isOwner && !canEditAny && canEditOwn && canWriteSharedGroup(item.id, userId, role) && !isSharedGroup(item.id);
     if (!isOwner && !canEditAny && !editorAccess) continue;
     execute('UPDATE connection_groups SET sort_order = ? WHERE id = ?', [item.sortOrder, item.id]);
   }
@@ -1050,11 +1097,21 @@ router.put('/groups/:id', (req: Request, res: Response) => {
   if (!group) { res.status(404).json({ error: 'Group not found' }); return; }
   const isOwner = group.user_id === userId;
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   // isSharedGroup excluded even when otherwise editor-writable: an editor may change
   // *contents* of a shared folder, never the shared folder (or an independently-shared
-  // sub-folder) itself — renaming it is not a content change.
-  const editorAccess = !isOwner && !canEditAny && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
+  // sub-folder) itself — renaming it is not a content change. Same base RBAC floor as
+  // PUT /:id — an editor share never substitutes for connections.edit_own.
+  const editorAccess = !isOwner && !canEditAny && canEditOwn && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
   if (!isOwner && !canEditAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
+
+  // A folder can never be reparented under itself or one of its own descendants — that
+  // would detach the whole subtree into an unreachable cycle. Applies to everyone, not
+  // just editors: this predates folder collaboration, but collaborators can now trigger it too.
+  if (parentId && (parentId === id || allDescendantGroupIdsUnscoped(id).includes(parentId))) {
+    res.status(400).json({ error: 'Cannot move a folder into itself or one of its own sub-folders' });
+    return;
+  }
 
   // A group's parent must belong to the same owner as the group itself — not the caller —
   // otherwise an `edit_any` admin reparenting someone else's group under their own folder
@@ -1066,10 +1123,17 @@ router.put('/groups/:id', (req: Request, res: Response) => {
   // An editor's reparenting is scoped to sub-folders of the SAME shared folder they were
   // granted edit access to — canWriteSharedGroup alone only proves the target is writable
   // by this editor, not that it's the same branch: an editor holding two independent
-  // edit-shares from the same owner could otherwise use one to reach into the other.
-  if (parentId && editorAccess && !sameSharedBranch(id, parentId, userId, role)) {
-    res.status(400).json({ error: 'Invalid parent folder' });
-    return;
+  // edit-shares from the same owner could otherwise use one to reach into the other. Gated
+  // on `parentId !== undefined` (not just truthy `parentId`) so an editor can't bypass this
+  // by passing `parentId: null` — silently moving the sub-folder to the owner's root, out
+  // of sight of every other collaborator, is exactly the kind of move this guard stops.
+  if (editorAccess && parentId !== undefined) {
+    const targetParentId = parentId || null;
+    const stillInBranch = targetParentId !== null && sameSharedBranch(id, targetParentId, userId, role);
+    if (!stillInBranch) {
+      res.status(400).json({ error: 'Invalid parent folder' });
+      return;
+    }
   }
 
   const updates: string[] = [];
@@ -1102,11 +1166,16 @@ router.delete('/groups/:id', (req: Request, res: Response) => {
   );
   if (!group) { res.status(404).json({ error: 'Group not found' }); return; }
   const isOwner = group.user_id === userId;
-  const canEditAny = userCan(req, 'connections.edit_any');
+  const canDeleteAny = userCan(req, 'connections.delete_any');
+  const canDeleteOwn = userCan(req, 'connections.delete_own');
+  // Same RBAC floor as DELETE /:id — an editor share never substitutes for the base
+  // connections.delete_own permission, and deleting someone ELSE's folder outright now
+  // requires connections.delete_any, not just connections.edit_any (pre-PR this route was
+  // strictly owner-only; edit_any alone must not be enough to delete a whole folder tree).
   // Same isSharedGroup exclusion as PUT /groups/:id: deleting the shared folder
   // itself (or an independently-shared sub-folder) is not a content change.
-  const editorAccess = !isOwner && !canEditAny && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
-  if (!isOwner && !canEditAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
+  const editorAccess = !isOwner && !canDeleteAny && canDeleteOwn && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
+  if (!isOwner && !canDeleteAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
 
   const ownerId = group.user_id;
 
@@ -1144,6 +1213,24 @@ router.delete('/groups/:id', (req: Request, res: Response) => {
       const error = blockedConnectionNames.length === 1
         ? `This folder contains a connection that is shared with someone else (${list}). Ask the owner to remove that share first, or to delete it themselves.`
         : `This folder contains connections that are shared with someone else (${list}). Ask the owner to remove those shares first, or to delete them themselves.`;
+      res.status(409).json({ error });
+      return;
+    }
+
+    // Same back-door concern as above, for an independently-shared SUB-folder swept up
+    // into this same deletion — isSharedGroup(id) above only guards the root being
+    // deleted, never a descendant folder that carries its own separate share, so deleting
+    // an unshared parent could otherwise silently destroy a child folder's share.
+    const blockedSubfolderIds = allGroupIdsUnscoped.filter((gid) => gid !== id && isSharedGroup(gid));
+    if (blockedSubfolderIds.length > 0) {
+      const names = queryAll<{ name: string }>(
+        `SELECT name FROM connection_groups WHERE id IN (${blockedSubfolderIds.map(() => '?').join(',')})`,
+        blockedSubfolderIds,
+      ).map((r) => r.name);
+      const list = names.map((n) => `"${n}"`).join(', ');
+      const error = names.length === 1
+        ? `This folder contains a sub-folder that is shared with someone else (${list}). Ask the owner to remove that share first, or to delete it themselves.`
+        : `This folder contains sub-folders that are shared with someone else (${list}). Ask the owner to remove those shares first, or to delete them themselves.`;
       res.status(409).json({ error });
       return;
     }
