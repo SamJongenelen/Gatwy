@@ -727,10 +727,17 @@ router.put('/:id', (req: Request, res: Response) => {
   // An editor's reparenting is scoped to sub-folders of the SAME shared folder they were
   // granted edit access to — canWriteSharedGroup alone only proves the target is writable
   // by this editor, not that it's the same branch: an editor holding two independent
-  // edit-shares from the same owner could otherwise use one to reach into the other.
-  if (groupId && editorAccess && !sameSharedBranch(existing.group_id!, groupId, userId, role)) {
-    res.status(400).json({ error: 'Invalid folder' });
-    return;
+  // edit-shares from the same owner could otherwise use one to reach into the other. Gated
+  // on `groupId !== undefined` (not just truthy `groupId`) so an editor can't bypass this by
+  // passing `groupId: null` — silently un-filing the connection to the owner's root, out of
+  // sight of every other collaborator, is exactly the kind of move this guard exists to stop.
+  if (editorAccess && groupId !== undefined) {
+    const targetGroupId = groupId || null;
+    const stillInBranch = targetGroupId !== null && sameSharedBranch(existing.group_id!, targetGroupId, userId, role);
+    if (!stillInBranch) {
+      res.status(400).json({ error: 'Invalid folder' });
+      return;
+    }
   }
 
   // Validate the credential the connection will use after this update — a newly
@@ -1098,10 +1105,17 @@ router.put('/groups/:id', (req: Request, res: Response) => {
   // An editor's reparenting is scoped to sub-folders of the SAME shared folder they were
   // granted edit access to — canWriteSharedGroup alone only proves the target is writable
   // by this editor, not that it's the same branch: an editor holding two independent
-  // edit-shares from the same owner could otherwise use one to reach into the other.
-  if (parentId && editorAccess && !sameSharedBranch(id, parentId, userId, role)) {
-    res.status(400).json({ error: 'Invalid parent folder' });
-    return;
+  // edit-shares from the same owner could otherwise use one to reach into the other. Gated
+  // on `parentId !== undefined` (not just truthy `parentId`) so an editor can't bypass this
+  // by passing `parentId: null` — silently moving the sub-folder to the owner's root, out
+  // of sight of every other collaborator, is exactly the kind of move this guard stops.
+  if (editorAccess && parentId !== undefined) {
+    const targetParentId = parentId || null;
+    const stillInBranch = targetParentId !== null && sameSharedBranch(id, targetParentId, userId, role);
+    if (!stillInBranch) {
+      res.status(400).json({ error: 'Invalid parent folder' });
+      return;
+    }
   }
 
   const updates: string[] = [];
