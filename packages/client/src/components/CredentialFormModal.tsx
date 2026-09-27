@@ -57,6 +57,9 @@ export function CredentialFormModal({ editing, canShare, onClose, onSaved, onCon
 
   async function handleSave(e: FormEvent) {
     e.preventDefault();
+    // React re-bubbles portal events through the React tree (not the DOM tree), so without this
+    // a caller rendering this modal from inside its own <form> (e.g. ConnectionModal) would also submit that form.
+    e.stopPropagation();
     setFormError('');
     if (!editing && type === 'key' && !privateKey.trim()) { setFormError('Private key is required'); return; }
     setSaving(true);
