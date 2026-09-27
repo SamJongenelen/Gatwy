@@ -1134,11 +1134,16 @@ router.delete('/groups/:id', (req: Request, res: Response) => {
   );
   if (!group) { res.status(404).json({ error: 'Group not found' }); return; }
   const isOwner = group.user_id === userId;
-  const canEditAny = userCan(req, 'connections.edit_any');
+  const canDeleteAny = userCan(req, 'connections.delete_any');
+  const canDeleteOwn = userCan(req, 'connections.delete_own');
+  // Same RBAC floor as DELETE /:id — an editor share never substitutes for the base
+  // connections.delete_own permission, and deleting someone ELSE's folder outright now
+  // requires connections.delete_any, not just connections.edit_any (pre-PR this route was
+  // strictly owner-only; edit_any alone must not be enough to delete a whole folder tree).
   // Same isSharedGroup exclusion as PUT /groups/:id: deleting the shared folder
   // itself (or an independently-shared sub-folder) is not a content change.
-  const editorAccess = !isOwner && !canEditAny && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
-  if (!isOwner && !canEditAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
+  const editorAccess = !isOwner && !canDeleteAny && canDeleteOwn && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
+  if (!isOwner && !canDeleteAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
 
   const ownerId = group.user_id;
 
