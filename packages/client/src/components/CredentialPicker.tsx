@@ -55,8 +55,10 @@ export function CredentialPicker({ pickableCreds, selectedCred, value, onChange 
       if (anchorRef.current?.contains(e.target as Node) || dropRef.current?.contains(e.target as Node)) return;
       setOpen(false);
     }
-    document.addEventListener('mousedown', handle);
-    return () => document.removeEventListener('mousedown', handle);
+    // Capture phase: parent modals call stopPropagation() on mousedown (bubble phase),
+    // which would otherwise stop this from ever reaching document and prevent closing.
+    document.addEventListener('mousedown', handle, true);
+    return () => document.removeEventListener('mousedown', handle, true);
   }, [open]);
 
   useEffect(() => {
