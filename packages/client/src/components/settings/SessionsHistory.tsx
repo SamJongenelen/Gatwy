@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useAuth } from '../../hooks/useAuth';
 import { useTimezone } from '../../hooks/useTimezone';
 import { formatDate as formatDateTz } from '../../utils/formatDate';
 import { Terminal } from '@xterm/xterm';
@@ -1002,8 +1003,12 @@ function FilterBar({
 }
 
 export function SessionsHistory() {
+  const { user } = useAuth();
+  // The retention/danger-zone settings require settings.manage — hide the tab entirely for
+  // users who only have sessions.view_own, since saving would just fail with a permissions error.
+  const canManageSettings = !!user?.permissions.includes('settings.manage');
   const timezone = useTimezone();
-  const [activeTab, setActiveTab] = useState<'recordings' | 'file-activity' | 'settings'>('settings');
+  const [activeTab, setActiveTab] = useState<'recordings' | 'file-activity' | 'settings'>(canManageSettings ? 'settings' : 'recordings');
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -1089,12 +1094,14 @@ export function SessionsHistory() {
     <div className="space-y-4">
       {/* Tab bar */}
       <div className="flex border-b border-border">
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'settings' ? 'border-accent text-accent' : 'border-transparent text-text-secondary hover:text-text-primary'}`}
-        >
-          Settings
-        </button>
+        {canManageSettings && (
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'settings' ? 'border-accent text-accent' : 'border-transparent text-text-secondary hover:text-text-primary'}`}
+          >
+            Settings
+          </button>
+        )}
         <button
           onClick={() => setActiveTab('recordings')}
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'recordings' ? 'border-accent text-accent' : 'border-transparent text-text-secondary hover:text-text-primary'}`}
@@ -1211,7 +1218,7 @@ export function SessionsHistory() {
       ))}
 
       {activeTab === 'file-activity' && <FileActivity />}
-      {activeTab === 'settings' && <RecordingSettings />}
+      {activeTab === 'settings' && canManageSettings && <RecordingSettings />}
     </div>
   );
 }
