@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { showToast } from '../hooks/useToast';
 import type { CredentialSummary, CredentialType } from '../lib/credentials';
 
@@ -99,7 +100,9 @@ export function CredentialFormModal({ editing, canShare, onClose, onSaved, onCon
     }
   }
 
-  return (
+  // Rendered via portal so this form is never a DOM descendant of a caller's own <form> (e.g. ConnectionModal),
+  // which would otherwise let its submit event bubble up and also trigger the outer form's submit handler.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="bg-surface-alt border border-border rounded-lg shadow-xl w-full max-w-md p-6 space-y-4 max-h-[90vh] overflow-y-auto">
@@ -236,6 +239,7 @@ export function CredentialFormModal({ editing, canShare, onClose, onSaved, onCon
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
