@@ -610,13 +610,16 @@ router.put('/reorder', (req: Request, res: Response) => {
   const { items } = req.body as { items?: { id: string; sortOrder: number }[] };
   if (!Array.isArray(items)) { res.status(400).json({ error: 'items array is required' }); return; }
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   for (const item of items) {
     const conn = queryOne<{ user_id: string; group_id: string | null }>(
       'SELECT user_id, group_id FROM connections WHERE id = ?', [item.id],
     );
     if (!conn) continue;
     const isOwner = conn.user_id === userId;
-    const editorAccess = !isOwner && !!conn.group_id && canWriteSharedGroup(conn.group_id, userId, role);
+    // Same base RBAC floor as PUT /:id — an editor share never substitutes for the base
+    // connections.edit_own permission.
+    const editorAccess = !isOwner && !canEditAny && canEditOwn && !!conn.group_id && canWriteSharedGroup(conn.group_id, userId, role);
     if (!isOwner && !canEditAny && !editorAccess) continue;
     execute('UPDATE connections SET sort_order = ? WHERE id = ?', [item.sortOrder, item.id]);
   }
@@ -1018,13 +1021,18 @@ router.put('/groups/reorder', (req: Request, res: Response) => {
   const { items } = req.body as { items?: { id: string; sortOrder: number }[] };
   if (!Array.isArray(items)) { res.status(400).json({ error: 'items array is required' }); return; }
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   for (const item of items) {
     const group = queryOne<{ user_id: string }>(
       'SELECT user_id FROM connection_groups WHERE id = ?', [item.id],
     );
     if (!group) continue;
     const isOwner = group.user_id === userId;
-    const editorAccess = !isOwner && canWriteSharedGroup(item.id, userId, role);
+    // Same base RBAC floor and isSharedGroup exclusion as PUT /groups/:id — reordering is
+    // a smaller action than renaming, but an editor share still shouldn't substitute for
+    // connections.edit_own, and an independently-shared sub-folder in this batch is still
+    // not this editor's to touch.
+    const editorAccess = !isOwner && !canEditAny && canEditOwn && canWriteSharedGroup(item.id, userId, role) && !isSharedGroup(item.id);
     if (!isOwner && !canEditAny && !editorAccess) continue;
     execute('UPDATE connection_groups SET sort_order = ? WHERE id = ?', [item.sortOrder, item.id]);
   }
@@ -1089,10 +1097,12 @@ router.put('/groups/:id', (req: Request, res: Response) => {
   if (!group) { res.status(404).json({ error: 'Group not found' }); return; }
   const isOwner = group.user_id === userId;
   const canEditAny = userCan(req, 'connections.edit_any');
+  const canEditOwn = userCan(req, 'connections.edit_own');
   // isSharedGroup excluded even when otherwise editor-writable: an editor may change
   // *contents* of a shared folder, never the shared folder (or an independently-shared
-  // sub-folder) itself — renaming it is not a content change.
-  const editorAccess = !isOwner && !canEditAny && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
+  // sub-folder) itself — renaming it is not a content change. Same base RBAC floor as
+  // PUT /:id — an editor share never substitutes for connections.edit_own.
+  const editorAccess = !isOwner && !canEditAny && canEditOwn && canWriteSharedGroup(id, userId, role) && !isSharedGroup(id);
   if (!isOwner && !canEditAny && !editorAccess) { res.status(403).json({ error: 'Not authorized' }); return; }
 
   // A group's parent must belong to the same owner as the group itself — not the caller —
