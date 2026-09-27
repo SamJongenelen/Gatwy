@@ -1179,6 +1179,24 @@ router.delete('/groups/:id', (req: Request, res: Response) => {
       res.status(409).json({ error });
       return;
     }
+
+    // Same back-door concern as above, for an independently-shared SUB-folder swept up
+    // into this same deletion — isSharedGroup(id) above only guards the root being
+    // deleted, never a descendant folder that carries its own separate share, so deleting
+    // an unshared parent could otherwise silently destroy a child folder's share.
+    const blockedSubfolderIds = allGroupIdsUnscoped.filter((gid) => gid !== id && isSharedGroup(gid));
+    if (blockedSubfolderIds.length > 0) {
+      const names = queryAll<{ name: string }>(
+        `SELECT name FROM connection_groups WHERE id IN (${blockedSubfolderIds.map(() => '?').join(',')})`,
+        blockedSubfolderIds,
+      ).map((r) => r.name);
+      const list = names.map((n) => `"${n}"`).join(', ');
+      const error = names.length === 1
+        ? `This folder contains a sub-folder that is shared with someone else (${list}). Ask the owner to remove that share first, or to delete it themselves.`
+        : `This folder contains sub-folders that are shared with someone else (${list}). Ask the owner to remove those shares first, or to delete them themselves.`;
+      res.status(409).json({ error });
+      return;
+    }
   }
 
   // Clean up resource_shares before any DELETE (no FK cascade to rely on).
