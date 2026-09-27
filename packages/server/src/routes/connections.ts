@@ -520,6 +520,14 @@ router.post('/', (req: Request, res: Response) => {
   // even at creation time. Silently ignored, not an error, same as PUT /:id.
   const effectiveShared = actingAsEditor ? false : !!shared;
 
+  // A connection an editor creates is inherently visible to the whole shared folder even
+  // though `effectiveShared` above is forced false (that only guards the global-share
+  // flag). For credential-assignability purposes it must be treated as shared regardless —
+  // otherwise an editor could link the folder OWNER's own private library credential to a
+  // connection whose host/port they fully control, then wait for the owner to connect and
+  // leak it. See the matching retarget guard in PUT /:id.
+  const credentialConnectionShared = actingAsEditor ? true : effectiveShared;
+
   if (blockedSharedCreate(req, effectiveShared)) {
     res.status(403).json({ error: 'Sharing permission required' });
     return;
@@ -542,7 +550,7 @@ router.post('/', (req: Request, res: Response) => {
     // Validated against the folder OWNER, not the caller — an editor linking their own
     // private library credential gets the same hard block the owner would ("Credential
     // not found"), since the row this creates belongs to the owner either way.
-    const err = checkCredentialAssignable(credentialId, ownerId, effectiveShared, userCan(req, 'credentials.use_shared'));
+    const err = checkCredentialAssignable(credentialId, ownerId, credentialConnectionShared, userCan(req, 'credentials.use_shared'));
     if (err) { res.status(400).json({ error: err }); return; }
   }
   const inlineKey = credentialId ? { key: null } : prepareInlineKey(privateKey);
@@ -633,10 +641,12 @@ router.put('/:id', (req: Request, res: Response) => {
     shared: number;
     extra_config_json: string | null;
     credential_id: string | null;
+    encrypted_password: string | null;
+    private_key: string | null;
   }
 
   const existing = queryOne<ExistingConnectionRow>(
-    'SELECT id, name, protocol, host, port, username, group_id, user_id, shared, extra_config_json, credential_id FROM connections WHERE id = ?',
+    'SELECT id, name, protocol, host, port, username, group_id, user_id, shared, extra_config_json, credential_id, encrypted_password, private_key FROM connections WHERE id = ?',
     [id],
   );
   if (!existing) {
@@ -689,6 +699,25 @@ router.put('/:id', (req: Request, res: Response) => {
     return;
   }
 
+  // An editor may never repoint a connection that already carries stored credentials — a
+  // private (non-shared) library credential, or any inline password/private key — at a
+  // different host/port/protocol. applyCredential resolves that secret for the OWNER, so
+  // retargeting it would let an editor redirect the owner's real saved credential to a
+  // server they control, the next time the owner opens what looks like their own connection.
+  if (editorAccess && (host !== undefined || port !== undefined || protocol !== undefined)) {
+    const linkedCredential = existing.credential_id
+      ? queryOne<{ shared: number }>('SELECT shared FROM credentials WHERE id = ?', [existing.credential_id])
+      : null;
+    const hasPrivateCredential = !!existing.credential_id && (!linkedCredential || linkedCredential.shared !== 1);
+    const hasInlineSecret = !!existing.encrypted_password || !!existing.private_key;
+    if (hasPrivateCredential || hasInlineSecret) {
+      res.status(400).json({
+        error: 'Editors cannot change the host, port, or protocol of a connection that has stored credentials. Clear the saved credentials first, or ask the owner to make this change.',
+      });
+      return;
+    }
+  }
+
   // A connection can only be filed under a folder its owner owns — otherwise it could be
   // planted into a folder shared to the owner, surfacing it to everyone that folder is shared with.
   if (groupId && !groupOwnedBy(groupId, existing.user_id)) {
@@ -711,7 +740,10 @@ router.put('/:id', (req: Request, res: Response) => {
   // credential must get the same hard block the owner would.
   const nextCredentialId: string | null = credentialId !== undefined ? (credentialId || null) : existing.credential_id;
   if (nextCredentialId && (credentialId !== undefined || shared !== undefined)) {
-    const nextShared = isConnectionShared(id, shared !== undefined ? !!shared : existing.shared);
+    // An editor's connection is inherently shared for this purpose (see the retarget guard
+    // above) — never let it fall through to the connection's own (possibly false) shared
+    // state, or an editor could still link the owner's private credential via this path.
+    const nextShared = editorAccess ? true : isConnectionShared(id, shared !== undefined ? !!shared : existing.shared);
     const err = checkCredentialAssignable(nextCredentialId, existing.user_id, nextShared, userCan(req, 'credentials.use_shared'));
     if (err) { res.status(400).json({ error: err }); return; }
   }
