@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      pull-requests: read
 
     steps:
       - name: Checkout
@@ -60,6 +61,10 @@ jobs:
 
       - name: Build release notes
         id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
@@ -79,40 +84,64 @@ jobs:
             RANGE="${PREV}..${{ github.ref_name }}"
           fi
 
-          # Dump commit subjects into a temp file for reliable processing
-          git log $RANGE --pretty=format:"%s" --no-merges --reverse > /tmp/commits.txt || true
+          # Collect merged PR numbers in range: merge-commit style ("Merge pull request #N ...")
+          # and squash-merge style (subject ending in "(#N)")
+          PR_NUMBERS=$(
+            {
+              git log $RANGE --merges --pretty=format:"%s" | grep -oE '^Merge pull request #[0-9]+' | grep -oE '[0-9]+'
+              git log $RANGE --no-merges --pretty=format:"%s" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+'
+            } | sort -un
+          )
 
-          capitalize() { python3 -c "import sys; s=sys.stdin.read().strip(); print(s[:1].upper()+s[1:])" <<< "$1"; }
+          strip_prefix() { echo "$1" | sed -E 's/^(feat|feature|fix|perf)(\([^)]*\))?: ?//'; }
+          capitalize() { python3 -c "import sys; s=sys.stdin.read().strip(); print(s[:1].upper()+s[1:] if s else '')" <<< "$1"; }
 
           FEATS=""
           FIXES=""
-          PERF=""
           MISC=""
-          SEEN=""
+          declare -A SEEN_PR
+          AUTHORS=()
 
-          while IFS= read -r msg || [ -n "$msg" ]; do
-            [ -z "$msg" ] && continue
-            # Strip conventional-commit prefix for the display text
-            display="$msg"
-            # Deduplicate by exact subject
-            case "$SEEN" in *"|${msg}|"*) continue ;; esac
-            SEEN="${SEEN}|${msg}|"
+          for n in $PR_NUMBERS; do
+            [ -n "${SEEN_PR[$n]:-}" ] && continue
+            SEEN_PR[$n]=1
 
-            if echo "$msg" | grep -qE '^(feat|feature)(\([^)]*\))?:'; then
-              display=$(echo "$msg" | sed -E 's/^(feat|feature)(\([^)]*\))?: ?//')
-              FEATS="${FEATS}"$'\n'"- $(capitalize "$display")"
-            elif echo "$msg" | grep -qE '^fix(\([^)]*\))?:'; then
-              display=$(echo "$msg" | sed -E 's/^fix(\([^)]*\))?: ?//')
-              FIXES="${FIXES}"$'\n'"- $(capitalize "$display")"
-            elif echo "$msg" | grep -qE '^perf(\([^)]*\))?:'; then
-              display=$(echo "$msg" | sed -E 's/^perf(\([^)]*\))?: ?//')
-              PERF="${PERF}"$'\n'"- $(capitalize "$display")"
-            elif echo "$msg" | grep -qE '^(ci|chore|docs|style|test|build|release)(\([^)]*\))?:'; then
-              true  # skip noise
-            else
-              MISC="${MISC}"$'\n'"- $(capitalize "$display")"
+            ROW=$(gh pr view "$n" --json title,author,labels --jq '[.title, .author.login, (.labels|map(.name)|join(","))] | @tsv' 2>/dev/null) || continue
+            [ -z "$ROW" ] && continue
+            IFS=$'\t' read -r title author labels <<< "$ROW"
+            [ -z "$title" ] && continue
+
+            # Skip noise: dependency bumps, docs-only, chore/ci/test PRs
+            case ",$labels," in
+              *,dependencies,*|*,documentation,*) continue ;;
+            esac
+            if echo "$title" | grep -qiE '^(chore|docs|ci|test|build|release)(\([^)]*\))?:'; then
+              continue
             fi
-          done < /tmp/commits.txt
+
+            if [ -n "$author" ] && [ "$author" != "$REPO_OWNER" ]; then
+              already=0
+              for a in "${AUTHORS[@]}"; do [ "$a" = "$author" ] && already=1; done
+              [ "$already" -eq 0 ] && AUTHORS+=("$author")
+            fi
+
+            display=$(capitalize "$(strip_prefix "$title")")
+            suffix=" (#${n}, @${author})"
+
+            case ",$labels," in
+              *,enhancement,*) FEATS="${FEATS}"$'\n'"- ${display}${suffix}" ;;
+              *,bug,*) FIXES="${FIXES}"$'\n'"- ${display}${suffix}" ;;
+              *)
+                if echo "$title" | grep -qE '^(feat|feature)(\([^)]*\))?:'; then
+                  FEATS="${FEATS}"$'\n'"- ${display}${suffix}"
+                elif echo "$title" | grep -qE '^fix(\([^)]*\))?:'; then
+                  FIXES="${FIXES}"$'\n'"- ${display}${suffix}"
+                else
+                  MISC="${MISC}"$'\n'"- ${display}${suffix}"
+                fi
+                ;;
+            esac
+          done
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           EOF_MARKER=$(openssl rand -hex 8)
@@ -132,20 +161,21 @@ jobs:
             echo "" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ -n "$PERF" ]; then
-            echo "### ⚡ Performance" >> "$GITHUB_OUTPUT"
-            echo "$PERF" | sed '/^$/d' >> "$GITHUB_OUTPUT"
-            echo "" >> "$GITHUB_OUTPUT"
-          fi
-
           if [ -n "$MISC" ]; then
             echo "### 🔧 Other Changes" >> "$GITHUB_OUTPUT"
             echo "$MISC" | sed '/^$/d' >> "$GITHUB_OUTPUT"
             echo "" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ -z "$FEATS" ] && [ -z "$FIXES" ] && [ -z "$PERF" ] && [ -z "$MISC" ]; then
+          if [ -z "$FEATS" ] && [ -z "$FIXES" ] && [ -z "$MISC" ]; then
             echo "- Minor improvements and bug fixes" >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${#AUTHORS[@]}" -gt 0 ]; then
+            THANKS=$(printf '@%s, ' "${AUTHORS[@]}")
+            THANKS="${THANKS%, }"
+            echo "Thanks to ${THANKS} for their contributions!" >> "$GITHUB_OUTPUT"
             echo "" >> "$GITHUB_OUTPUT"
           fi
 
