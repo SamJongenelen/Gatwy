@@ -20,6 +20,8 @@ function parseIpRule(rule: string): { family: Family; address: string; prefix: n
   if (extra.length > 0) return null;
   const kind = net.isIP(address);
   if (kind === 0) return null;
+  // Clients are normalised to plain IPv4 before matching, so an IPv4-mapped rule would never match
+  if (kind === 6 && /^::ffff:/i.test(address)) return null;
   const family: Family = kind === 4 ? 'ipv4' : 'ipv6';
   if (prefixStr === undefined) return { family, address, prefix: null };
   if (!/^\d{1,3}$/.test(prefixStr)) return null;

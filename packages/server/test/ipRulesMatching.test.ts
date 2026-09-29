@@ -101,6 +101,13 @@ describe('isValidIpRule', () => {
       assert.equal(isValidIpRule(rule), false, rule);
     }
   });
+
+  it('rejects leading zeros and IPv4-mapped IPv6 rules (they would never match)', () => {
+    for (const rule of ['010.0.0.1', '10.00.0.1', '::ffff:10.1.2.3', '::FFFF:10.1.2.3/104']) {
+      assert.equal(isValidIpRule(rule), false, rule);
+      assert.equal(matchesCidr('10.1.2.3', rule), false, rule);
+    }
+  });
 });
 
 describe('evaluateIpRules with IPv6', () => {

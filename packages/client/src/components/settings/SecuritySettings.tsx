@@ -13,7 +13,8 @@ interface IpRule {
 // would lock the current session out. Handles IPv4 and IPv6 addresses and CIDR ranges.
 function parseIp(raw: string): { bits: 32 | 128; value: bigint } | null {
   const ip = raw.split('%')[0].replace(/^::ffff:/i, '');
-  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  const octet = '(0|[1-9]\\d{0,2})'; // no leading zeros, like the server
+  const v4 = ip.match(new RegExp(`^${octet}\\.${octet}\\.${octet}\\.${octet}$`));
   if (v4) {
     const parts = v4.slice(1).map(Number);
     if (parts.some((p) => p > 255)) return null;
@@ -32,6 +33,7 @@ function parseIp(raw: string): { bits: 32 | 128; value: bigint } | null {
 
 function matchesCidr(ip: string, cidr: string): boolean {
   const [range, prefixStr, ...extra] = cidr.trim().split('/');
+  if (/^::ffff:/i.test(range)) return false; // an IPv4-mapped rule is invalid on the server
   const addr = parseIp(ip);
   const base = parseIp(range);
   if (extra.length > 0 || !addr || !base || addr.bits !== base.bits) return false;
