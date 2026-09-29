@@ -6,6 +6,7 @@ import { getAllSettings, getSetting, setSettings } from '../services/settings.js
 import { encrypt, usingFileKey } from '../services/encryption.js';
 import { execute, queryAll } from '../db/helpers.js';
 import { resolveClientIp } from '../services/ip.js';
+import { isValidIpRule } from '../middleware/ipRules.js';
 
 const router = Router();
 
@@ -83,6 +84,11 @@ router.put('/ip-rules', (req: Request, res: Response) => {
   for (const rule of rules) {
     if (!rule || (rule.type !== 'allow' && rule.type !== 'deny') || !rule.cidr?.trim()) {
       res.status(400).json({ error: 'Invalid IP rule' });
+      return;
+    }
+    if (!isValidIpRule(rule.cidr)) {
+      // A malformed rule would silently never match (and in an allowlist lock everyone out)
+      res.status(400).json({ error: `Invalid IP address or CIDR range: ${rule.cidr.trim()}` });
       return;
     }
 
