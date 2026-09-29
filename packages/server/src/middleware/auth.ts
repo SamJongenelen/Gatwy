@@ -4,6 +4,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { verifyToken, type JwtPayload } from '../services/jwt.js';
 import { checkAndTouchSession, revokeSessionByHash } from '../services/loginSession.js';
 import { roleHasPermission, type PermissionKey } from '../services/permissions.js';
+import { queryOne } from '../db/helpers.js';
 
 declare global {
   namespace Express {
@@ -27,6 +28,15 @@ export function authRequired(req: Request, res: Response, next: NextFunction): v
   try {
     const payload = verifyToken(token);
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // A JWT outlives its user. Its session row can't be relied on to say so: it is gone
+    // once the user is deleted (FK cascade), and a missing row is 'not_found', which the
+    // pre-login_sessions compat path below lets through. A token for a user that no
+    // longer exists is never legitimate, so reject it independently of the session row.
+    if (!queryOne('SELECT 1 FROM users WHERE id = ?', [payload.userId])) {
+      res.status(401).json({ error: 'User no longer exists' });
+      return;
+    }
 
     const isHeartbeat = req.query['heartbeat'] === '1';
     const sessionStatus = checkAndTouchSession(tokenHash, isHeartbeat);

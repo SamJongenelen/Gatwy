@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { queryOne, execute } from '../db/helpers.js';
+import { revokeUserSessions } from '../services/loginSession.js';
 import { authRequired } from '../middleware/auth.js';
 import { logAudit } from '../services/audit.js';
 import { getSetting } from '../services/settings.js';
@@ -45,7 +46,7 @@ setInterval(() => {
   for (const [id, rec] of mfaVerifyAttempts) {
     if (now > rec.resetAt) mfaVerifyAttempts.delete(id);
   }
-}, MFA_VERIFY_WINDOW_MS);
+}, MFA_VERIFY_WINDOW_MS).unref(); // cleanup only — must not keep the process (or a test run) alive
 
 interface UserRow {
   id: string;
@@ -167,7 +168,7 @@ router.put('/password', async (req: Request, res: Response) => {
   execute("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?", [newHash, userId]);
 
   // Revoke all other active sessions so compromised tokens can't persist (C4)
-  execute('DELETE FROM login_sessions WHERE user_id = ? AND token_hash != ?', [userId, req.user!.tokenHash]);
+  revokeUserSessions(userId, req.user!.tokenHash);
 
   logAudit({
     userId,

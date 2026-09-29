@@ -11,7 +11,7 @@ setInterval(() => {
   for (const [k, v] of stateStore) {
     if (now - v.createdAt > STATE_TTL_MS) stateStore.delete(k);
   }
-}, 60_000);
+}, 60_000).unref();
 
 export interface OidcUserInfo {
   sub: string;

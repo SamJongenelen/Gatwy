@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { v4 as uuid } from 'uuid';
-import { execute, queryOne } from '../db/helpers.js';
+import { execute, queryAll, queryOne } from '../db/helpers.js';
+import { closeSessionConnections } from '../ws/wsRegistry.js';
 import { getSetting } from './settings.js';
 import { parseUA } from './ua.js';
 import { resolveClientIp } from './ip.js';
@@ -32,6 +33,35 @@ export function createLoginSession(req: Request, userId: string, token: string):
 /** Revoke a session by its token hash. Used for best-effort cleanup (e.g. expired JWT). */
 export function revokeSessionByHash(tokenHash: string): void {
   execute('UPDATE login_sessions SET revoked = 1 WHERE token_hash = ?', [tokenHash]);
+}
+
+/**
+ * Revoke every session of a user, optionally sparing one token (the caller's own).
+ * Must UPDATE, never DELETE: checkAndTouchSession/isSessionRevoked treat a missing row
+ * as 'not_found' (pre-login_sessions tokens) and let it through, so a deleted row leaves
+ * the JWT fully valid until it expires.
+ */
+export function revokeUserSessions(userId: string, exceptTokenHash?: string): void {
+  // Collect the hashes first: the proxies only check isSessionRevoked() when a socket is
+  // opened, so terminals already connected must be closed explicitly (same as
+  // routes/loginSessions.ts does for the profile page's revoke).
+  const rows = exceptTokenHash
+    ? queryAll<{ token_hash: string }>(
+        'SELECT token_hash FROM login_sessions WHERE user_id = ? AND token_hash != ?',
+        [userId, exceptTokenHash],
+      )
+    : queryAll<{ token_hash: string }>('SELECT token_hash FROM login_sessions WHERE user_id = ?', [userId]);
+
+  if (exceptTokenHash) {
+    execute(
+      'UPDATE login_sessions SET revoked = 1 WHERE user_id = ? AND token_hash != ?',
+      [userId, exceptTokenHash],
+    );
+  } else {
+    execute('UPDATE login_sessions SET revoked = 1 WHERE user_id = ?', [userId]);
+  }
+
+  for (const row of rows) closeSessionConnections(row.token_hash);
 }
 
 interface SessionRow {
