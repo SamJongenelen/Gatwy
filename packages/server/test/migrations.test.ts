@@ -116,4 +116,25 @@ describe('migration upgrade path', () => {
     const maxAfter = after.exec('SELECT MAX(version) as v FROM schema_version')[0]!.values[0]![0];
     assert.equal(maxAfter, 23);
   });
+
+  it('applies a lower-numbered migration that is missing even when a higher one is already applied', () => {
+    // Models two branches merging in the opposite order of their migration numbers: an
+    // install already at v23 must still pick up a lower-numbered migration it never ran.
+    // Gating on MAX(version) skips it forever; gating on the set of applied versions
+    // does not. v22 (group_shares) stands in for the missing lower-numbered migration.
+    const db = getDb();
+    db.run('DROP TABLE IF EXISTS group_shares');
+    db.run('DELETE FROM schema_version WHERE version = 22');
+
+    const maxBefore = db.exec('SELECT MAX(version) as v FROM schema_version')[0]!.values[0]![0];
+    assert.equal(maxBefore, 23, 'precondition: a higher version is already applied');
+    assert.equal(db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='group_shares'").length, 0);
+
+    restoreDbFromBytes(Buffer.from(db.export()));
+
+    const migrated = getDb();
+    assert.equal(migrated.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='group_shares'").length, 1, 'v22 must run even though v23 is already applied');
+    assert.equal(migrated.exec('SELECT COUNT(*) FROM schema_version WHERE version = 22')[0]!.values[0]![0], 1);
+    assert.equal(migrated.exec('SELECT COUNT(*) FROM schema_version WHERE version = 23')[0]!.values[0]![0], 1, 'v23 must not be re-applied');
+  });
 });
