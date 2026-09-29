@@ -54,7 +54,7 @@ function authedFetch(token: string, url: string, init: RequestInit = {}): Promis
 }
 
 describe('DELETE /:id (users) — cleans up resource_shares where the deleted user was owner or recipient', () => {
-  it('removes shares in both roles, leaves an unrelated share between other users intact', async () => {
+  it('refuses while the user owns shared resources, then removes recipient-side shares and leaves unrelated ones intact', async () => {
     const A = 'user-A-owner-and-recipient';
     const B = 'user-B-recipient-of-A';
     const C = 'user-C-owner-shares-to-A-and-B';
@@ -97,29 +97,29 @@ describe('DELETE /:id (users) — cleans up resource_shares where the deleted us
       ['share-c-to-b', 'g-owned-by-c-to-b', B],
     );
 
+    // A still owns shared resources: deletion is refused, nothing is touched.
+    const blocked = await authedFetch(adminToken, `${baseUrl}/${A}`, { method: 'DELETE' });
+    assert.equal(blocked.status, 409);
+    const body = await blocked.json() as { connections: { id: string; shareCount: number }[]; groups: { id: string; shareCount: number }[] };
+    assert.deepEqual(body.connections.map((c) => [c.id, c.shareCount]), [['conn-owned-by-a', 1]]);
+    assert.deepEqual(body.groups.map((g) => [g.id, g.shareCount]), [['g-owned-by-a', 1]]);
+    assert.ok(queryOne('SELECT id FROM users WHERE id = ?', [A]), 'user A must still exist after a refused delete');
+    assert.ok(queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-a-owns-to-b']), 'a refused delete must not touch shares');
+
+    // Once A's own shares are removed, the delete goes through.
+    execute('DELETE FROM resource_shares WHERE id IN (?, ?)', ['share-a-owns-to-b', 'share-a-conn-to-b']);
     const res = await authedFetch(adminToken, `${baseUrl}/${A}`, { method: 'DELETE' });
     assert.equal(res.status, 200);
 
-    assert.equal(queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-a-owns-to-b']), undefined, 'A-as-owner group share must be gone');
-    assert.equal(queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-a-conn-to-b']), undefined, 'A-as-owner connection share must be gone');
     assert.equal(queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-c-to-a']), undefined, 'A-as-recipient share must be gone');
     assert.ok(queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-c-to-b']), 'unrelated share between C and B must survive');
     assert.equal(queryOne('SELECT id FROM users WHERE id = ?', [A]), undefined, 'user A itself must be deleted');
   });
 
-  it('keeps a "planted" sub-folder\'s share in sync with whether the folder itself still exists', async () => {
-    // connection_groups.parent_id is declared ON DELETE CASCADE, but FK enforcement never
-    // actually runs in this app today (sql.js drops PRAGMA foreign_keys on every
-    // db.export(), i.e. every autosave — tracked separately, fixed on its own branch). A
-    // sub-folder owned by a different user X but parented under A's root therefore
-    // survives deleting A untouched today.
-    //
-    // The invariant below — not "the folder survives" — is what should hold in BOTH
-    // states: today (no cascade, folder survives, share must survive with it) and after
-    // the FK fix lands (cascade fires, folder is gone, share must be cleaned up too, which
-    // needs the descendant-expansion this test currently guards against restoring
-    // unconditionally). It fails if the share is orphaned OR if it's deleted out from
-    // under a folder that's still there — pointing at the wrong one either way is a bug.
+  it('blocks deleting a user whose tree holds a shared "planted" sub-folder owned by someone else', async () => {
+    // connection_groups.parent_id is ON DELETE CASCADE and FK enforcement now stays on, so a
+    // sub-folder owned by a different user X but parented under A's root is removed when A
+    // is deleted — and with it X's share of that folder. The guard must see it.
     const A = 'user-planted-root-owner';
     const X = 'user-planted-subfolder-owner';
     const B = 'user-planted-recipient';
@@ -139,12 +139,20 @@ describe('DELETE /:id (users) — cleans up resource_shares where the deleted us
       ['share-planted-sub-to-b', 'g-planted-sub', B],
     );
 
+    // The planted sub-folder is shared, and deleting A would cascade it away (FK
+    // enforcement is on) — so the delete is refused and names that folder.
+    const blocked = await authedFetch(adminToken, `${baseUrl}/${A}`, { method: 'DELETE' });
+    assert.equal(blocked.status, 409);
+    const body = await blocked.json() as { groups: { id: string; shareCount: number }[] };
+    assert.deepEqual(body.groups.map((g) => [g.id, g.shareCount]), [['g-planted-sub', 1]]);
+    assert.ok(queryOne('SELECT id FROM connection_groups WHERE id = ?', ['g-planted-sub']), 'a refused delete must not remove the folder');
+
+    // With the share removed the delete goes through and the cascade takes the folder,
+    // leaving no orphaned share behind.
+    execute('DELETE FROM resource_shares WHERE id = ?', ['share-planted-sub-to-b']);
     const res = await authedFetch(adminToken, `${baseUrl}/${A}`, { method: 'DELETE' });
     assert.equal(res.status, 200);
-
-    const subFolder = queryOne('SELECT id FROM connection_groups WHERE id = ?', ['g-planted-sub']);
-    const share = queryOne('SELECT id FROM resource_shares WHERE id = ?', ['share-planted-sub-to-b']);
-    assert.equal(!!share, !!subFolder, 'share must exist iff its folder still exists — no orphan, no lost share');
+    assert.equal(queryOne('SELECT id FROM connection_groups WHERE id = ?', ['g-planted-sub']), undefined, 'cascade must remove the planted sub-folder');
   });
 
   it('does not delete a role-targeted share whose role id collides with the deleted user id', async () => {
