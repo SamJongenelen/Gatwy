@@ -24,6 +24,7 @@ import {
   verifyPasskeyAuthentication,
   cleanupExpiredChallenges,
 } from '../services/passkey.js';
+import { isTrustedProxyAddress } from '../services/ip.js';
 
 // ── Proxy detection helper ───────────────────────────────────────────────────
 function detectProxyIp(req: Request): string | null {
@@ -36,26 +37,8 @@ function detectProxyIp(req: Request): string | null {
   const peerIp = rawPeer.replace(/^::ffff:/i, '');
   if (!peerIp) return null;
 
-  const trusted = getSetting('security.trusted_proxies').trim();
-  if (trusted === 'true' || trusted === '*') return null;
-  if (trusted) {
-    const entries = trusted.split(',').map((s) => s.trim()).filter(Boolean);
-    const isAlreadyTrusted = entries.some((entry) => {
-      if (entry.includes('/')) {
-        try {
-          const [range, bitsStr] = entry.split('/');
-          const bits = parseInt(bitsStr, 10);
-          if (bits < 0 || bits > 32) return false;
-          const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-          const toNum = (s: string) =>
-            s.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0) >>> 0;
-          return (toNum(peerIp) & mask) === (toNum(range) & mask);
-        } catch { return false; }
-      }
-      return entry === peerIp;
-    });
-    if (isAlreadyTrusted) return null;
-  }
+  // Already trusted (same predicate Express uses for `trust proxy`): nothing to suggest
+  if (isTrustedProxyAddress(peerIp)) return null;
 
   return peerIp;
 }

@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'http';
 import { getSetting } from './settings.js';
+import { matchesCidr, isValidIpRule } from './cidr.js';
 
 /**
  * Whether `ip` is one of the reverse proxies configured in `security.trusted_proxies`
@@ -8,29 +9,29 @@ import { getSetting } from './settings.js';
  * Used both as Express's `trust proxy` predicate and for WebSocket upgrades.
  */
 export function isTrustedProxyAddress(ip: string): boolean {
-  // Node.js reports IPv4 clients as ::ffff:x.x.x.x on dual-stack sockets.
-  // Strip the IPv6-mapped prefix so configured entries like "192.168.1.1"
-  // or "192.168.1.0/24" match correctly.
-  const addr = stripMappedPrefix(ip);
   const val = getSetting('security.trusted_proxies').trim();
   if (!val || val === 'false') return false;
   if (val === 'true' || val === '*') return true;
-  const entries = val.split(',').map((s) => s.trim()).filter(Boolean);
-  return entries.some((entry) => {
-    if (entry.includes('/')) {
-      // CIDR match (IPv4 only)
-      try {
-        const [range, bitsStr] = entry.split('/');
-        const bits = parseInt(bitsStr, 10);
-        if (bits < 0 || bits > 32) return false;
-        const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-        const toNum = (s: string) =>
-          s.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0) >>> 0;
-        return (toNum(addr) & mask) === (toNum(range) & mask);
-      } catch { return false; }
+  // IPv4 and IPv6 addresses and CIDR ranges. Node reports IPv4 clients as ::ffff:x.x.x.x on
+  // dual-stack sockets: matchesCidr strips that prefix. A malformed entry trusts nobody.
+  return val.split(',').some((entry) => matchesCidr(ip, entry));
+}
+
+/**
+ * Validates a value for `security.trusted_proxies`; returns a message for the first problem, or null.
+ * Accepts "", "true", "false", "*" or a comma-separated list of IPv4/IPv6 addresses and CIDR ranges.
+ */
+export function validateTrustedProxies(value: unknown): string | null {
+  if (typeof value !== 'string') return 'security.trusted_proxies must be a string';
+  const val = value.trim();
+  if (!val || val === 'true' || val === 'false' || val === '*') return null;
+  for (const raw of val.split(',')) {
+    const entry = raw.trim();
+    if (!isValidIpRule(entry)) {
+      return `Invalid trusted proxy entry: "${entry}". Use IPv4/IPv6 addresses or CIDR ranges (an IPv4 address, not ::ffff:x.x.x.x).`;
     }
-    return entry === addr;
-  });
+  }
+  return null;
 }
 
 /**
