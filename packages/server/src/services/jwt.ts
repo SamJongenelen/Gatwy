@@ -42,7 +42,10 @@ export function signToken(payload: JwtPayload, maxMinutes?: number): string {
       expiresInSeconds = num * (multipliers[unit] || 1);
     }
   }
-  return jwt.sign(payload, secret, { expiresIn: expiresInSeconds });
+  // jwtid makes every token unique. Without it, two logins of the same user within the same
+  // second produced byte-identical tokens and login_sessions.token_hash (UNIQUE) rejected the
+  // second one with a 500, after createLoginSession had already revoked the first session.
+  return jwt.sign(payload, secret, { expiresIn: expiresInSeconds, jwtid: crypto.randomUUID() });
 }
 
 export function verifyToken(token: string): JwtPayload {
