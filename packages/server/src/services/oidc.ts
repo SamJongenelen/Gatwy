@@ -96,6 +96,39 @@ export async function buildOidcAuthUrl(): Promise<{ url: string; state: string }
   return { url: `${authEndpoint}?${params.toString()}`, state };
 }
 
+const ID_TOKEN_CLOCK_SKEW_MS = 60_000;
+
+export function decodeIdTokenClaims(idToken: string): Record<string, unknown> | null {
+  const parts = idToken.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as unknown;
+    return claims && typeof claims === 'object' && !Array.isArray(claims) ? claims as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+// The id_token comes straight from the token endpoint over TLS in exchange for our
+// authenticated code, so per OIDC Core 3.1.3.7 the signature check may be skipped;
+// the claims still have to be validated. Returns a description of the first problem, or null.
+export function checkIdTokenClaims(
+  claims: Record<string, unknown>,
+  expected: { clientId: string; nonce: string; issuer?: string },
+): string | null {
+  // Multi-tenant issuers (e.g. Azure "common") are templates such as {tenantid}: not comparable
+  if (expected.issuer && !expected.issuer.includes('{')) {
+    const trim = (s: string) => s.replace(/\/$/, '');
+    if (typeof claims['iss'] !== 'string' || trim(claims['iss']) !== trim(expected.issuer)) return 'iss mismatch';
+  }
+  const aud = claims['aud'];
+  if (!(aud === expected.clientId || (Array.isArray(aud) && aud.includes(expected.clientId)))) return 'aud mismatch';
+  const exp = claims['exp'];
+  if (typeof exp !== 'number' || exp * 1000 + ID_TOKEN_CLOCK_SKEW_MS < Date.now()) return 'expired or missing exp';
+  if (claims['nonce'] !== expected.nonce) return 'nonce mismatch';
+  return null;
+}
+
 export async function handleOidcCallback(
   code: string,
   state: string,
@@ -118,11 +151,13 @@ export async function handleOidcCallback(
   const discoveryUrl = cfg.providerUrl.replace(/\/$/, '') + '/.well-known/openid-configuration';
   let tokenEndpoint: string;
   let userinfoEndpoint: string;
+  let issuer: string | undefined;
   try {
     const res = await fetch(discoveryUrl);
-    const doc = await res.json() as { token_endpoint: string; userinfo_endpoint: string };
+    const doc = await res.json() as { token_endpoint: string; userinfo_endpoint: string; issuer?: string };
     tokenEndpoint = doc.token_endpoint;
     userinfoEndpoint = doc.userinfo_endpoint;
+    issuer = doc.issuer;
   } catch (err) {
     console.error('[OIDC] Discovery error:', err instanceof Error ? err.message : err);
     return null;
@@ -165,16 +200,15 @@ export async function handleOidcCallback(
     accessToken = tokenData.access_token;
 
     if (tokenData.id_token) {
-      const parts = tokenData.id_token.split('.');
-      if (parts.length === 3) {
-        try {
-          idTokenClaims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
-        } catch {
-          idTokenClaims = {};
-        }
-      } else {
-        idTokenClaims = {};
+      const claims = decodeIdTokenClaims(tokenData.id_token);
+      const problem = claims
+        ? checkIdTokenClaims(claims, { clientId: cfg.clientId, nonce: stored.nonce, issuer })
+        : 'malformed id_token';
+      if (problem || !claims) {
+        console.error(`[OIDC] Rejected id_token: ${problem}`);
+        return null;
       }
+      idTokenClaims = claims;
     } else {
       idTokenClaims = {};
     }
@@ -190,6 +224,11 @@ export async function handleOidcCallback(
     });
     if (!uiRes.ok) throw new Error(`Userinfo failed: ${uiRes.status}`);
     userinfo = await uiRes.json() as Record<string, unknown>;
+    // OIDC Core 5.3.2: the userinfo sub must match the id_token sub
+    if (idTokenClaims['sub'] !== undefined && userinfo['sub'] !== undefined && idTokenClaims['sub'] !== userinfo['sub']) {
+      console.error('[OIDC] Userinfo sub does not match id_token sub');
+      return null;
+    }
   } catch (err) {
     console.error('[OIDC] Userinfo error:', err instanceof Error ? err.message : err);
     userinfo = idTokenClaims;
