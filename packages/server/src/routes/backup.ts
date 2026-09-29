@@ -102,6 +102,9 @@ async function reEncryptDbBytes(dbBytes: Buffer, backupKeyHex: string, liveKeyHe
   reEncryptSetting('auth.ldap_bind_password');
   reEncryptSetting('auth.oidc_client_secret');
 
+  // Raw export() on purpose, unlike getDb() call sites (see exportDbBytes() in db/index.ts):
+  // tmpDb is a throwaway connection, closed right below and never used again, so the
+  // PRAGMA reset export() causes (foreign_keys back to OFF) has nothing to affect.
   const result = Buffer.from(tmpDb.export());
   tmpDb.close();
   return result;
