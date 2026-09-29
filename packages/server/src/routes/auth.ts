@@ -833,6 +833,16 @@ router.post('/login/ldap', async (req: Request, res: Response) => {
   });
 });
 
+const OIDC_STATE_COOKIE = 'gatwy_oidc_state';
+const OIDC_STATE_COOKIE_PATH = '/api/v1/auth/oidc';
+
+function stateMatchesCookie(state: string, cookie: unknown): boolean {
+  if (typeof cookie !== 'string') return false;
+  const a = Buffer.from(state);
+  const b = Buffer.from(cookie);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 // GET /oidc/authorize — redirect the browser to the OIDC provider
 router.get('/oidc/authorize', async (_req: Request, res: Response) => {
   if (!isOidcEnabled()) {
@@ -846,12 +856,25 @@ router.get('/oidc/authorize', async (_req: Request, res: Response) => {
     return;
   }
 
+  // Bind the flow to the browser that started it, so a callback URL obtained by
+  // someone else (login CSRF) is rejected. Lax: the callback is a cross-site
+  // top-level navigation from the IdP, which Strict would not carry the cookie on.
+  res.cookie(OIDC_STATE_COOKIE, result.state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 10 * 60 * 1000,
+    path: OIDC_STATE_COOKIE_PATH,
+  });
   res.json({ url: result.url });
 });
 
 // GET /oidc/callback — OIDC provider redirects back here after authentication
 router.get('/oidc/callback', async (req: Request, res: Response) => {
   const { code, state, error, error_description } = req.query as Record<string, string>;
+
+  const stateCookie = req.cookies?.[OIDC_STATE_COOKIE];
+  res.clearCookie(OIDC_STATE_COOKIE, { path: OIDC_STATE_COOKIE_PATH });
 
   if (error) {
     const msg = encodeURIComponent(error_description ?? error ?? 'OIDC error');
@@ -861,6 +884,12 @@ router.get('/oidc/callback', async (req: Request, res: Response) => {
 
   if (!code || !state) {
     res.redirect('/?sso_error=missing_params');
+    return;
+  }
+
+  if (!stateMatchesCookie(state, stateCookie)) {
+    console.error('[OIDC] State does not match the browser that started the flow');
+    res.redirect('/?sso_error=auth_failed');
     return;
   }
 
