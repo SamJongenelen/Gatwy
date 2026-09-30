@@ -225,7 +225,7 @@ describe('migration upgrade path', () => {
   });
 
   it('v24 rebuild keeps ssh_commands/rdp_events/file_session_events intact and backfills username/connection_name', () => {
-    // Simulate a real, populated install upgrading from v22: recreate sessions/
+    // Simulate a real, populated install upgrading from v23: recreate sessions/
     // file_sessions/db_query_history with their OLD (CASCADE-FK, no snapshot columns)
     // shape, seed real history under them, then let v24 run for real via
     // restoreDbFromBytes. A naive rebuild (DROP TABLE with foreign_keys still ON)
@@ -296,7 +296,7 @@ describe('migration upgrade path', () => {
     db.run(`INSERT INTO file_session_events (id, session_id, action, path) VALUES ('evt-v24-upgrade', 'fs-v24-upgrade', 'browse', '/')`);
     db.run(`INSERT INTO db_query_history (id, user_id, connection_id, query_text) VALUES ('q-v24-upgrade', 'u-v24-upgrade', 'c-v24-upgrade', 'SELECT 1')`);
 
-    db.run('DELETE FROM schema_version WHERE version > 22');
+    db.run('DELETE FROM schema_version WHERE version > 23');
 
     const bytes = Buffer.from(db.export());
     restoreDbFromBytes(bytes);
