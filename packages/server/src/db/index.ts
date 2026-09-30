@@ -29,10 +29,13 @@ export function getDb(): Database {
  * `getDb().export()` call site had this same bug (backup size estimate, backup download,
  * auto-backup) — routing all of them through here, not just the autosave path in
  * `saveDb()`, is what actually closes the gap.
+ *
+ * Takes an optional connection so scratch databases (e.g. the re-encrypted copy in
+ * routes/backup.ts) go through the same path instead of a raw `.export()`.
  */
-export function exportDbBytes(): Uint8Array {
-  const data = db.export();
-  applyDbPragmas(db);
+export function exportDbBytes(database: Database = db): Uint8Array {
+  const data = database.export();
+  applyDbPragmas(database);
   return data;
 }
 
