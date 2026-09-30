@@ -225,10 +225,17 @@ function runMigrations() {
     );
   `);
 
-  const result = db.exec('SELECT MAX(version) as v FROM schema_version');
-  const currentVersion = result.length > 0 && result[0].values.length > 0
-    ? (result[0].values[0][0] as number ?? 0)
-    : 0;
+  // Gate on the SET of applied versions, not on MAX(version): with MAX, a migration whose
+  // number is lower than one already applied is skipped forever on every upgraded install
+  // — exactly how group_shares went missing when it was first numbered v20 behind an
+  // already-applied v21 (see the first test in migrations.test.ts). That happens whenever
+  // two branches each add a migration and merge in the opposite order of their numbers.
+  // Per-version gating lets the lower-numbered one still run later; the array order below
+  // still decides sequence.
+  const appliedRows = db.exec('SELECT version FROM schema_version');
+  const applied = new Set<number>(
+    appliedRows.length > 0 ? appliedRows[0].values.map((row) => row[0] as number) : [],
+  );
 
   const migrations: { version: number; sql?: string; run?: (database: Database) => void }[] = [
     {
@@ -1040,7 +1047,7 @@ function runMigrations() {
   ];
 
   for (const migration of migrations) {
-    if (migration.version > currentVersion) {
+    if (!applied.has(migration.version)) {
       if (migration.sql) {
         db.run(migration.sql);
       } else if (migration.run) {
