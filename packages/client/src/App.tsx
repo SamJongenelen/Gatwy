@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import { SetupPage } from './pages/SetupPage';
 import { LoginPage } from './pages/LoginPage';
@@ -7,6 +7,7 @@ import { ProxyDetectionToast } from './components/ProxyDetectionToast';
 
 export function App() {
   const { user, loading, needsSetup } = useAuth();
+  const { search } = useLocation();
 
   if (loading || needsSetup === null) {
     return (
@@ -28,7 +29,8 @@ export function App() {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        {/* Keep the query string: the SSO callback lands on /?sso_error=… and LoginPage reads it */}
+        <Route path="*" element={<Navigate to={{ pathname: '/login', search }} replace />} />
       </Routes>
     );
   }
