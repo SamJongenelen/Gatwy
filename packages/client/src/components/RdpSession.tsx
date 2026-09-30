@@ -653,25 +653,46 @@ export function RdpSession({ tab, onStatusChange, onClose }: RdpSessionProps) {
         // Ctrl+C / Ctrl+V are excluded so browser copy/paste events still fire for
         // the clipboard bridge. OS-level shortcuts (Alt+Tab, Win+*) are unreachable
         // from JS; use fullscreen + Keyboard Lock for browser-level ones (Ctrl+Tab etc.).
-        const onKey = (e: KeyboardEvent) => {
-          // Don't capture keyboard when a text input elsewhere on the page has focus
-          // (e.g. the connection modal, search boxes, etc.)
+        // Without a readable clipboard (Firefox), a paste chord is held back until the
+        // paste event has pushed the local clipboard to the remote, so the remote's
+        // paste sees it.
+        const PASTE_HOLD_MS = 250;
+        let heldKeys: Array<() => void> | null = null;
+        let heldKeysTimer: ReturnType<typeof setTimeout> | null = null;
+        const releaseHeldKeys = () => {
+          if (heldKeysTimer) clearTimeout(heldKeysTimer);
+          heldKeysTimer = null;
+          const queued = heldKeys;
+          heldKeys = null;
+          queued?.forEach((fn) => fn());
+        };
+
+        const isTextInputFocused = (allowMobileKeyboard: boolean) => {
           const active = document.activeElement;
-          if (
-            active &&
+          return !!active &&
             active !== canvas &&
-            // Allow events through when the active element is our mobile keyboard
-            // textarea (identified by data-mobile-keyboard attribute).
-            (active as HTMLElement).getAttribute('data-mobile-keyboard') !== 'true' &&
+            !(allowMobileKeyboard && (active as HTMLElement).getAttribute('data-mobile-keyboard') === 'true') &&
             (active.tagName === 'INPUT' ||
               active.tagName === 'TEXTAREA' ||
               active.tagName === 'SELECT' ||
-              (active as HTMLElement).isContentEditable)
-          ) return;
+              (active as HTMLElement).isContentEditable);
+        };
 
+        const onKey = (e: KeyboardEvent) => {
+          // Don't capture keyboard when a text input elsewhere on the page has focus
+          // (e.g. the connection modal, search boxes, etc.). The mobile keyboard
+          // textarea (data-mobile-keyboard) is allowed through.
+          if (isTextInputFocused(true)) return;
+
+          const noExtraModifiers = !e.altKey && !e.metaKey;
+          const isPasteChord = noExtraModifiers && (
+            (e.code === 'KeyV' && e.ctrlKey) ||
+            (e.code === 'Insert' && e.shiftKey && !e.ctrlKey)
+          );
+          const pasteViaEvent = clipboardService.usesPasteEvent && isPasteChord;
           const isBrowserClipboard =
-            (e.code === 'KeyC' || e.code === 'KeyV') && e.ctrlKey && !e.altKey && !e.metaKey;
-          if (!isBrowserClipboard) e.preventDefault();
+            (e.code === 'KeyC' || e.code === 'KeyV') && e.ctrlKey && noExtraModifiers;
+          if (!isBrowserClipboard && !pasteViaEvent) e.preventDefault();
 
           // Some browsers report the pre-toggle state on a lock key's keydown;
           // the matching keyup reports the new one and corrects it.
@@ -680,21 +701,43 @@ export function RdpSession({ tab, onStatusChange, onClose }: RdpSessionProps) {
           if (LOCK_CODES.has(e.code)) return;
           if (e.repeat && NO_REPEAT_CODES.has(e.code)) return;
 
-          const pressed = e.type === 'keydown';
-          if (pressed) {
-            pushEventRef.current?.('key');
-          }
-          const scancode = CODE_TO_SCANCODE[e.code];
-          if (scancode !== undefined) {
-            applyEvents(pressed ? DeviceEvent.keyPressed(scancode) : DeviceEvent.keyReleased(scancode));
-          } else if (pressed && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-            applyEvents(DeviceEvent.unicodePressed(e.key));
-          } else if (!pressed && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-            applyEvents(DeviceEvent.unicodeReleased(e.key));
+          const forward = () => {
+            const pressed = e.type === 'keydown';
+            if (pressed) {
+              pushEventRef.current?.('key');
+            }
+            const scancode = CODE_TO_SCANCODE[e.code];
+            if (scancode !== undefined) {
+              applyEvents(pressed ? DeviceEvent.keyPressed(scancode) : DeviceEvent.keyReleased(scancode));
+            } else if (pressed && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              applyEvents(DeviceEvent.unicodePressed(e.key));
+            } else if (!pressed && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              applyEvents(DeviceEvent.unicodeReleased(e.key));
+            }
+          };
+
+          if (heldKeys) {
+            heldKeys.push(forward);
+          } else if (pasteViaEvent && e.type === 'keydown') {
+            heldKeys = [forward];
+            heldKeysTimer = setTimeout(releaseHeldKeys, PASTE_HOLD_MS);
+          } else {
+            forward();
           }
         };
 
+        const onPaste = (e: ClipboardEvent) => {
+          if (isTextInputFocused(false)) {
+            releaseHeldKeys();
+            return;
+          }
+          clipboardService.handlePaste(e).catch(() => {}).finally(releaseHeldKeys);
+        };
+
         const onBlur = () => {
+          if (heldKeysTimer) clearTimeout(heldKeysTimer);
+          heldKeysTimer = null;
+          heldKeys = null;
           session.releaseAllInputs();
           lastLocks = ''; // re-sync on the next event — locks may change while away
         };
@@ -742,6 +785,7 @@ export function RdpSession({ tab, onStatusChange, onClose }: RdpSessionProps) {
         // Capture phase: our handler runs before the browser acts on shortcuts
         window.addEventListener('keydown', onKey, true);
         window.addEventListener('keyup', onKey, true);
+        window.addEventListener('paste', onPaste, false);
         window.addEventListener('blur', onBlur, false);
         window.addEventListener('dragenter', onFileDragEnter, false);
         window.addEventListener('dragover', onFileDragOver, false);
@@ -763,6 +807,7 @@ export function RdpSession({ tab, onStatusChange, onClose }: RdpSessionProps) {
         canvas.removeEventListener('contextmenu', onContextMenu);
         window.removeEventListener('keydown', onKey, true);
         window.removeEventListener('keyup', onKey, true);
+        window.removeEventListener('paste', onPaste);
         window.removeEventListener('blur', onBlur);
         window.removeEventListener('dragenter', onFileDragEnter);
         window.removeEventListener('dragover', onFileDragOver);

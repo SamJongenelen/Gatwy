@@ -2,8 +2,9 @@
  * RDP Clipboard Service — adapted from IronRDP's official ClipboardService pattern.
  *
  * Uses a 100ms polling loop to detect local clipboard changes and sync them to the
- * remote RDP session. Supports text and image (PNG) clipboard data on Chromium, with
- * graceful text-only fallback for Firefox.
+ * remote RDP session. Supports text and image (PNG) clipboard data on Chromium.
+ * Browsers that prompt on every programmatic clipboard read (Firefox, Safari) never
+ * poll; local -> remote sync happens from the user's paste event instead.
  */
 
 type ClipboardDataCtor = new () => {
@@ -37,6 +38,7 @@ export class RdpClipboardService {
   private monitorTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private monitoringSuppressed = false;
+  private pasteEventOnly = false;
 
   private lastClientClipboardItems: Record<string, string | Uint8Array> = {};
   private lastReceivedClipboardData: Record<string, string | Uint8Array> = {};
@@ -67,6 +69,10 @@ export class RdpClipboardService {
       this.apiSupport = ClipboardApiSupport.TextOnly;
     }
 
+    if (typeof navigator.clipboard.readText !== 'function') {
+      this.pasteEventOnly = true;
+    }
+
     if (this.apiSupport === ClipboardApiSupport.Full) {
       try {
         const status = await navigator.permissions.query({
@@ -76,11 +82,9 @@ export class RdpClipboardService {
           this.apiSupport = ClipboardApiSupport.TextOnly;
         }
       } catch {
-        try {
-          await navigator.clipboard.read();
-        } catch {
-          this.apiSupport = ClipboardApiSupport.TextOnly;
-        }
+        // No 'clipboard-read' permission (Firefox, Safari): every read shows a Paste popup.
+        this.pasteEventOnly = true;
+        this.apiSupport = ClipboardApiSupport.TextOnly;
       }
     }
 
@@ -101,11 +105,46 @@ export class RdpClipboardService {
     this.monitoringSuppressed = false;
   }
 
+  /** True when local -> remote sync must come from paste events instead of polling. */
+  get usesPasteEvent(): boolean {
+    return this.pasteEventOnly;
+  }
+
   startMonitoring(): void {
+    if (this.pasteEventOnly) return;
     if (this.apiSupport === ClipboardApiSupport.Full || this.apiSupport === ClipboardApiSupport.TextOnly) {
       this.scheduleMonitor();
     }
   }
+
+  /** Sends the pasted clipboard to the remote. Must be called synchronously from the paste event. */
+  handlePaste = async (e: ClipboardEvent): Promise<void> => {
+    if (!this.pasteEventOnly || !this.session || this.monitoringSuppressed) return;
+    const data = e.clipboardData;
+    if (!data) return;
+
+    const text = data.getData('text/plain');
+    const png = Array.from(data.files).find((f) => f.type === 'image/png');
+
+    const values: Record<string, string | Uint8Array> = {};
+    if (text) values['text/plain'] = text;
+    if (png) values['image/png'] = new Uint8Array(await png.arrayBuffer());
+    if (Object.keys(values).length === 0) return;
+
+    const changed = Object.entries(values).some(
+      ([kind, value]) =>
+        !this.isEqual(this.lastClientClipboardItems[kind], value) &&
+        !this.isEqual(this.lastReceivedClipboardData[kind], value),
+    );
+    if (!changed) return;
+
+    this.lastClientClipboardItems = values;
+    try {
+      await this.sendClipboardValues(values);
+    } catch {
+      // Swallow — a failed clipboard push must not block the paste keystroke
+    }
+  };
 
   dispose(): void {
     this.destroyed = true;
