@@ -15,7 +15,6 @@ import { setupVncProxy } from './ws/vncProxy.js';
 import { setupTelnetProxy } from './ws/telnetProxy.js';
 import { setupMoonlightProxy } from './ws/moonlightProxy.js';
 import { ensureMoonlightWeb, isMoonlightWebAvailable, stopMoonlightWeb } from './services/moonlightWeb.js';
-import { getSetting } from './services/settings.js';
 import { startAutoBackupScheduler } from './services/autoBackup.js';
 import authRoutes from './routes/auth.js';
 import connectionRoutes from './routes/connections.js';
@@ -37,7 +36,8 @@ import rolesRoutes from './routes/roles.js';
 import notificationsRoutes from './routes/notifications.js';
 import databaseRoutes from './routes/database.js';
 import moonlightRoutes from './routes/moonlight.js';
-import { ipRulesMiddleware } from './middleware/ipRules.js';
+import { ipRulesMiddleware, guardUpgradesByIpRules } from './middleware/ipRules.js';
+import { isTrustedProxyAddress } from './services/ip.js';
 
 async function main() {
   // Ensure data directories
@@ -72,31 +72,8 @@ async function main() {
 
   // Trust proxy — dynamically evaluated per request so UI changes take effect
   // without a container restart.
-  app.set('trust proxy', (ip: string) => {
-    // Node.js reports IPv4 clients as ::ffff:x.x.x.x on dual-stack sockets.
-    // Strip the IPv6-mapped prefix so configured entries like "192.168.1.1"
-    // or "192.168.1.0/24" match correctly.
-    const addr = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-    const val = getSetting('security.trusted_proxies').trim();
-    if (!val || val === 'false') return false;
-    if (val === 'true' || val === '*') return true;
-    const entries = val.split(',').map((s) => s.trim()).filter(Boolean);
-    return entries.some((entry) => {
-      if (entry.includes('/')) {
-        // CIDR match (IPv4 only)
-        try {
-          const [range, bitsStr] = entry.split('/');
-          const bits = parseInt(bitsStr, 10);
-          if (bits < 0 || bits > 32) return false;
-          const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-          const toNum = (s: string) =>
-            s.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0) >>> 0;
-          return (toNum(addr) & mask) === (toNum(range) & mask);
-        } catch { return false; }
-      }
-      return entry === addr;
-    });
-  });
+  // The predicate lives in services/ip.ts so WebSocket upgrades resolve the client IP the same way.
+  app.set('trust proxy', (ip: string) => isTrustedProxyAddress(ip));
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
@@ -177,6 +154,12 @@ async function main() {
 
   // HTTPS server (created before /mlw so the WS upgrade handler can attach)
   const server = https.createServer({ cert, key }, app);
+
+  // IP rules also apply to every WebSocket upgrade (ssh/rdp/vnc/telnet//mlw) and to /mlw HTTP:
+  // /api/v1 is the only Express mount covered by ipRulesMiddleware. Must come before the
+  // proxies below register their own 'upgrade' listeners.
+  guardUpgradesByIpRules(server);
+  app.use('/mlw', ipRulesMiddleware);
 
   // /mlw HTTP + WS: JWT cookie + protocols.moonlight (same authorizeMoonlightAccess)
   // Must be registered before the SPA catch-all.

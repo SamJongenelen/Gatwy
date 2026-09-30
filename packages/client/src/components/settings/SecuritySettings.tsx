@@ -9,21 +9,38 @@ interface IpRule {
   description: string;
 }
 
-function ipToNum(ip: string): number {
-  return ip.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0) >>> 0;
+// Same rules as the server (middleware/ipRules.ts), used to warn before saving rules that
+// would lock the current session out. Handles IPv4 and IPv6 addresses and CIDR ranges.
+function parseIp(raw: string): { bits: 32 | 128; value: bigint } | null {
+  const ip = raw.split('%')[0].replace(/^::ffff:/i, '');
+  const octet = '(0|[1-9]\\d{0,2})'; // no leading zeros, like the server
+  const v4 = ip.match(new RegExp(`^${octet}\\.${octet}\\.${octet}\\.${octet}$`));
+  if (v4) {
+    const parts = v4.slice(1).map(Number);
+    if (parts.some((p) => p > 255)) return null;
+    return { bits: 32, value: parts.reduce((acc, p) => (acc << 8n) | BigInt(p), 0n) };
+  }
+  if (!ip.includes(':')) return null;
+  const halves = ip.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  if (halves.length === 1 ? head.length !== 8 : head.length + tail.length > 7) return null;
+  const groups = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return { bits: 128, value: groups.reduce((acc, g) => (acc << 16n) | BigInt(parseInt(g, 16)), 0n) };
 }
 
 function matchesCidr(ip: string, cidr: string): boolean {
-  if (!cidr.includes('/')) return cidr === ip;
-  try {
-    const [range, bitsStr] = cidr.split('/');
-    const bits = parseInt(bitsStr, 10);
-    if (bits < 0 || bits > 32) return false;
-    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-    return (ipToNum(ip) & mask) === (ipToNum(range) & mask);
-  } catch {
-    return false;
-  }
+  const [range, prefixStr, ...extra] = cidr.trim().split('/');
+  if (/^::ffff:/i.test(range)) return false; // an IPv4-mapped rule is invalid on the server
+  const addr = parseIp(ip);
+  const base = parseIp(range);
+  if (extra.length > 0 || !addr || !base || addr.bits !== base.bits) return false;
+  if (prefixStr === undefined) return addr.value === base.value;
+  if (!/^\d{1,3}$/.test(prefixStr) || Number(prefixStr) > base.bits) return false;
+  const shift = BigInt(base.bits - Number(prefixStr));
+  return (addr.value >> shift) === (base.value >> shift);
 }
 
 export function SecuritySettings() {
