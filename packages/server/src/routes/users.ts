@@ -6,6 +6,7 @@ import { authRequired, userCan } from '../middleware/auth.js';
 import { logAudit } from '../services/audit.js';
 import { getUserPasskeys, adminResetPasskeys } from '../services/passkey.js';
 import { sharedCredentialsInUseByOthers } from '../services/credentials.js';
+import { revokeUserSessions } from '../services/loginSession.js';
 
 const router = Router();
 router.use(authRequired);
@@ -142,6 +143,14 @@ router.put('/:id', (req: Request, res: Response) => {
     return;
   }
 
+  // Same rule as DELETE and as the UI: nobody changes their own role. The role lives in the
+  // JWT, so the caller's own session would keep the old one until it expires. The client
+  // resends the unchanged role on every save, so only a real change is rejected.
+  if (role !== undefined && role !== user.role && id === req.user!.userId) {
+    res.status(400).json({ error: 'Cannot change your own role' });
+    return;
+  }
+
   const updates: string[] = [];
   const params: unknown[] = [];
 
@@ -172,6 +181,13 @@ router.put('/:id', (req: Request, res: Response) => {
   params.push(id);
 
   execute(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
+
+  // The role is baked into the JWT, so live sessions would keep the old permissions until
+  // the token expires. Force a re-login when it actually changes (the client resends the
+  // unchanged role on every save, so compare). Never the caller: self role change is rejected above.
+  if (role !== undefined && role !== user.role) {
+    revokeUserSessions(id);
+  }
 
   logAudit({
     userId: req.user!.userId,
@@ -243,6 +259,11 @@ router.delete('/:id', (req: Request, res: Response) => {
   );
   execute(`DELETE FROM resource_shares WHERE share_type = 'user' AND target_id = ?`, [id]);
 
+  // Revoke first: the JWT outlives the user row and authRequired never checks the user
+  // still exists. Where FKs are enforced the cascade removes these rows anyway, but a
+  // missing row is 'not_found' and fails open — the revoked flag is what actually blocks.
+  revokeUserSessions(id);
+
   execute('DELETE FROM users WHERE id = ?', [id]);
 
   logAudit({
@@ -278,7 +299,7 @@ router.post('/:id/reset-password', async (req: Request, res: Response) => {
   execute("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?", [passwordHash, id]);
 
   // Revoke all sessions for this user so old password tokens become invalid (C4)
-  execute('DELETE FROM login_sessions WHERE user_id = ?', [id]);
+  revokeUserSessions(id);
 
   logAudit({
     userId: req.user!.userId,

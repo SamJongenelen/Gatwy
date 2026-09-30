@@ -33,4 +33,4 @@ setInterval(() => {
   for (const [id, ticket] of tickets) {
     if (now > ticket.expiresAt) tickets.delete(id);
   }
-}, 60_000);
+}, 60_000).unref(); // cleanup only — must not keep the process (or a test run) alive

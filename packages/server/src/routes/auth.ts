@@ -8,6 +8,7 @@ import { logAudit } from '../services/audit.js';
 import { getSetting } from '../services/settings.js';
 import { config } from '../config.js';
 import { createLoginSession, hashToken } from '../services/loginSession.js';
+import { closeSessionConnections } from '../ws/wsRegistry.js';
 import { authRequired, adminRequired } from '../middleware/auth.js';
 import { getPermissionsForRole } from '../services/permissions.js';
 import { runtimeFeatures } from '../services/moonlightWeb.js';
@@ -82,7 +83,7 @@ setInterval(() => {
   for (const [ip, rec] of ipLoginAttempts) {
     if (now > rec.resetAt) ipLoginAttempts.delete(ip);
   }
-}, IP_RATE_WINDOW_MS);
+}, IP_RATE_WINDOW_MS).unref(); // cleanup only — must not keep the process (or a test run) alive
 
 // ── Per-userId MFA brute-force protection ──────────────────────────────────────
 const mfaLoginAttempts = new Map<string, IpRecord>();
@@ -109,7 +110,7 @@ setInterval(() => {
   for (const [id, rec] of mfaLoginAttempts) {
     if (now > rec.resetAt) mfaLoginAttempts.delete(id);
   }
-}, MFA_RATE_WINDOW_MS);
+}, MFA_RATE_WINDOW_MS).unref();
 
 const TRUSTED_DEVICE_COOKIE = 'gatwy_trusted_device';
 const TRUSTED_DEVICE_DAYS = 30;
@@ -717,13 +718,16 @@ router.post('/login/passkey', async (req: Request, res: Response) => {
 // Cleanup expired passkey challenges periodically
 setInterval(() => {
   cleanupExpiredChallenges();
-}, 5 * 60 * 1000); // Every 5 minutes
+}, 5 * 60 * 1000).unref(); // Every 5 minutes
 
 // Logout — revoke the current session token
 router.post('/logout', authRequired, (req: Request, res: Response) => {
   const tokenHash = req.user!.tokenHash;
   if (tokenHash) {
     execute('UPDATE login_sessions SET revoked = 1 WHERE token_hash = ?', [tokenHash]);
+    // Terminals already open on this session outlive the revoked flag (the proxies only
+    // check it at connect time), same as the profile page's revoke does.
+    closeSessionConnections(tokenHash);
   }
   logAudit({
     userId: req.user!.userId,
