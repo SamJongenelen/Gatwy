@@ -43,7 +43,7 @@ router.get('/', (req: Request, res: Response) => {
 
   const sessions = queryAll<SessionRow>(
     `SELECT s.id, s.user_id, s.connection_id, s.protocol, s.started_at, s.ended_at, s.recording_path,
-            c.name AS connection_name, u.username
+            COALESCE(c.name, s.connection_name) AS connection_name, COALESCE(u.username, s.username) AS username
      FROM sessions s
      LEFT JOIN connections c ON c.id = s.connection_id
      LEFT JOIN users u ON u.id = s.user_id
@@ -85,6 +85,7 @@ router.delete('/', requirePermission('sessions.delete'), (req: Request, res: Res
   const rows = queryAll<{ recording_path: string | null }>('SELECT recording_path FROM sessions', []);
   const totalSessions = rows.length;
   const totalFileSessions = queryAll<{ id: string }>('SELECT id FROM file_sessions', []).length;
+  const totalQueryHistory = queryAll<{ id: string }>('SELECT id FROM db_query_history', []).length;
 
   // Close any in-flight RDP recording writers
   for (const [sid, writer] of rdpWriters) {
@@ -107,15 +108,20 @@ router.delete('/', requirePermission('sessions.delete'), (req: Request, res: Res
   execute('DELETE FROM file_session_events', []);
   execute('DELETE FROM file_sessions', []);
 
+  // DB query history no longer cascades off connections/users (it deliberately survives
+  // their deletion), and DELETE /db/:connectionId/history 404s once the connection is
+  // gone — so this is the only place rows for a deleted connection can ever be removed.
+  execute('DELETE FROM db_query_history', []);
+
   logAudit({
     userId,
     eventType: 'admin.sessions.purge',
     target: 'all',
-    details: { deletedSessions: totalSessions, deletedRecordings, deletedFileSessions: totalFileSessions },
+    details: { deletedSessions: totalSessions, deletedRecordings, deletedFileSessions: totalFileSessions, deletedQueryHistory: totalQueryHistory },
     ipAddress: req.ip,
   });
 
-  res.json({ ok: true, deletedSessions: totalSessions, deletedRecordings, deletedFileSessions: totalFileSessions });
+  res.json({ ok: true, deletedSessions: totalSessions, deletedRecordings, deletedFileSessions: totalFileSessions, deletedQueryHistory: totalQueryHistory });
 });
 
 // GET /:id/recording — stream recording file (.cast or .webm) with Range support
@@ -181,8 +187,8 @@ router.post('/rdp-session', (req: Request, res: Response) => {
 
   const role = req.user!.role;
   const access = connectionAccessWhere('connections', userId, role);
-  const conn = queryOne<{ id: string; recording_enabled: number }>(
-    `SELECT id, recording_enabled FROM connections WHERE id = ? AND ${access.where}`,
+  const conn = queryOne<{ id: string; name: string; recording_enabled: number }>(
+    `SELECT id, name, recording_enabled FROM connections WHERE id = ? AND ${access.where}`,
     [connectionId, ...access.params],
   );
   if (!conn) { res.status(404).json({ error: 'Connection not found' }); return; }
@@ -197,8 +203,8 @@ router.post('/rdp-session', (req: Request, res: Response) => {
 
   const sessionId = uuid();
   execute(
-    'INSERT INTO sessions (id, user_id, connection_id, protocol) VALUES (?, ?, ?, ?)',
-    [sessionId, userId, connectionId, 'rdp'],
+    'INSERT INTO sessions (id, user_id, connection_id, protocol, username, connection_name) VALUES (?, ?, ?, ?, ?, ?)',
+    [sessionId, userId, connectionId, 'rdp', req.user!.username, conn.name],
   );
   res.json({ sessionId, shouldRecord: true });
 });
@@ -446,10 +452,19 @@ export function purgeOldRecordings(): void {
   }
 }
 
-// Run purge on startup and then every 6 hours
-setTimeout(() => {
-  purgeOldRecordings();
-  setInterval(() => purgeOldRecordings(), 6 * 60 * 60 * 1000);
+// Run purge on startup and then every 6 hours. Wrapped: this fires from a bare timer,
+// not a request or the autosave loop, so nothing else catches a throw here — same
+// defensive pattern as startAutoSave() in db/index.ts. In practice this also matters for
+// any short-lived process that imports this router (e.g. a test) and closes the DB
+// before this timer's first 5s delay elapses. unref()'d for the same reason `stopAutoSave`
+// exists: a background timer must never be the thing keeping a short-lived process alive.
+const initialPurgeTimer = setTimeout(() => {
+  try { purgeOldRecordings(); } catch (err) { console.error('[sessions] Recording purge failed:', err); }
+  const recurringPurgeTimer = setInterval(() => {
+    try { purgeOldRecordings(); } catch (err) { console.error('[sessions] Recording purge failed:', err); }
+  }, 6 * 60 * 60 * 1000);
+  recurringPurgeTimer.unref();
 }, 5000);
+initialPurgeTimer.unref();
 
 export default router;

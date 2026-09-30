@@ -105,11 +105,13 @@ export function RecordingSettings() {
         deletedSessions?: number;
         deletedRecordings?: number;
         deletedFileSessions?: number;
+        deletedQueryHistory?: number;
         error?: string;
       };
       if (res.ok) {
         const fileNote = (d.deletedFileSessions ?? 0) > 0 ? ` and ${d.deletedFileSessions} file activity session(s)` : '';
-        showToast(`Deleted ${d.deletedSessions ?? 0} sessions and ${d.deletedRecordings ?? 0} recordings${fileNote}.`, 'success');
+        const queryNote = (d.deletedQueryHistory ?? 0) > 0 ? ` and ${d.deletedQueryHistory} DB query history row(s)` : '';
+        showToast(`Deleted ${d.deletedSessions ?? 0} sessions and ${d.deletedRecordings ?? 0} recordings${fileNote}${queryNote}.`, 'success');
         setShowPurgeConfirm(false);
         setStorageBytes(0);
       } else {

@@ -5,7 +5,7 @@ import { getSetting, setSetting } from './settings.js';
 import { decrypt, encrypt } from './encryption.js';
 import { applyCredential } from './credentials.js';
 import { createBackup, getRecordingsSizeInfo } from './backup.js';
-import { getDb } from '../db/index.js';
+import { exportDbBytes } from '../db/index.js';
 import { logAudit } from './audit.js';
 import { patchSmbNtlm } from './smbPatch.js';
 import SMB2 from '@marsaud/smb2';
@@ -430,7 +430,7 @@ function isManagedBackupName(name: string): boolean {
 }
 
 function estimateBackupSizeBytes(includeRecordings: boolean): number {
-  const dbSize = Buffer.from(getDb().export()).length;
+  const dbSize = Buffer.from(exportDbBytes()).length;
   if (!includeRecordings) return dbSize;
   const rec = getRecordingsSizeInfo();
   return dbSize + rec.recordingsSize;
@@ -641,7 +641,7 @@ async function executeBackup(triggerType: 'scheduled' | 'manual'): Promise<void>
         throw new Error('Estimated backup size exceeds 4 GB limit.');
       }
 
-      const dbBytes = Buffer.from(getDb().export());
+      const dbBytes = Buffer.from(exportDbBytes());
       const backupBuf = createBackup(sensitive.password, dbBytes, config.includeRecordings);
       if (backupBuf.length > MAX_BACKUP_BYTES) {
         throw new Error('Backup size exceeds 4 GB limit.');

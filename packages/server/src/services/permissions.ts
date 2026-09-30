@@ -313,6 +313,45 @@ export function allDescendantGroupIdsUnscoped(rootId: string): string[] {
   return [...result];
 }
 
+export interface SharedResourceBlockers {
+  connections: { id: string; name: string; shareCount: number }[];
+  groups: { id: string; name: string; shareCount: number }[];
+}
+
+/**
+ * Resources that deleting `ownerId` would take away from people they are shared with:
+ * the user's own connections and folders that carry a share, plus any shared folder
+ * anywhere beneath one of their folders (regardless of who owns it — the parent_id
+ * cascade removes it too, see allDescendantGroupIdsUnscoped). Used to block user
+ * deletion with a 409 until those shares are removed, same idea as
+ * sharedCredentialsInUseByOthers.
+ */
+export function sharedResourcesOwnedBy(ownerId: string): SharedResourceBlockers {
+  const connections = queryAll<{ id: string; name: string; shareCount: number }>(
+    `SELECT c.id, c.name, COUNT(rs.id) AS shareCount
+     FROM connections c
+     JOIN resource_shares rs ON rs.resource_type = 'connection' AND rs.resource_id = c.id
+     WHERE c.user_id = ?
+     GROUP BY c.id
+     ORDER BY c.name COLLATE NOCASE`,
+    [ownerId],
+  );
+
+  const ownedGroupIds = queryAll<{ id: string }>('SELECT id FROM connection_groups WHERE user_id = ?', [ownerId]);
+  const doomedGroupIds = [...new Set(ownedGroupIds.flatMap((g) => allDescendantGroupIdsUnscoped(g.id)))];
+  const groups = doomedGroupIds.length === 0 ? [] : queryAll<{ id: string; name: string; shareCount: number }>(
+    `SELECT g.id, g.name, COUNT(rs.id) AS shareCount
+     FROM connection_groups g
+     JOIN resource_shares rs ON rs.resource_type = 'group' AND rs.resource_id = g.id
+     WHERE g.id IN (${doomedGroupIds.map(() => '?').join(',')})
+     GROUP BY g.id
+     ORDER BY g.name COLLATE NOCASE`,
+    doomedGroupIds,
+  );
+
+  return { connections, groups };
+}
+
 /**
  * Walks UP from `groupId` through parent_id (the opposite direction of every other helper
  * in this file, which all walk down) to tell whether `groupId` or any ancestor is itself

@@ -162,7 +162,16 @@ describe('credential rules', () => {
     });
 
     it('yields no credentials when the link is dangling', () => {
-      addConnection('conn-dangling', ALICE, { credentialId: 'cred-gone' });
+      // A dangling credential_id can't be INSERTed anymore with foreign_keys enforced —
+      // this simulates data left behind by something outside the FK's reach (a restored
+      // backup, direct DB surgery, a bug elsewhere), which applyCredential still has to
+      // handle defensively. Toggle enforcement off only for this one INSERT.
+      getDb().run('PRAGMA foreign_keys = OFF');
+      try {
+        addConnection('conn-dangling', ALICE, { credentialId: 'cred-gone' });
+      } finally {
+        getDb().run('PRAGMA foreign_keys = ON');
+      }
       const res = applyCredential(connRow('conn-dangling'), ALICE);
       assert.equal(res.username, null);
       assert.equal(res.encrypted_password, null);
