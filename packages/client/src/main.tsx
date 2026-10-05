@@ -4,7 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { AuthProvider } from './hooks/useAuth';
 import { ThemeProvider } from './hooks/useTheme';
-import { BASE_PATH } from './lib/basePath';
+import { BASE_PATH, routerBasename } from './lib/basePath';
 import './styles/globals.css';
 
 // Global fetch intercept:
@@ -51,7 +51,7 @@ window.WebSocket = PatchedWebSocket as typeof WebSocket;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename={routerBasename(BASE_PATH)}>
       <ThemeProvider>
         <AuthProvider>
           <App />
