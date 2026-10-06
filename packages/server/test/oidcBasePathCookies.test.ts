@@ -1,16 +1,6 @@
 // Regression test for two PR-review blockers found when Gatwy runs behind a reverse-proxy
 // path prefix (BASE_PATH, see config.ts#normalizeBasePath):
-//
-// 1. OIDC SSO was broken under a prefix: the `gatwy_oidc_state` cookie's Path attribute was
-//    hardcoded to '/api/v1/auth/oidc', so when the whole app (including this route) is mounted
-//    under `${BASE_PATH}/api/v1/auth/oidc`, the browser never attached the cookie back on the
-//    callback request — the Path attribute is matched literally, not resolved against BASE_PATH.
-//    The post-login/error redirects also hardcoded the domain root ('/') instead of
-//    `${BASE_PATH}/`, so a successful or failed SSO landed the user outside the prefixed app.
-//
-// 2. Session/trusted-device cookies used Path=/ unconditionally — under a prefix that hands the
-//    Gatwy session cookie to every other app on the same shared domain, since Path=/ covers the
-//    whole origin, not just the prefix Gatwy is served under.
+
 import assert from 'node:assert/strict';
 import { describe, it, before, after } from 'node:test';
 import fs from 'node:fs';
