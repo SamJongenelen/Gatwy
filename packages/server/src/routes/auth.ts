@@ -100,8 +100,7 @@ const TRUSTED_DEVICE_DAYS = 30;
 
 // Cookie Path attribute: scoped to the reverse-proxy prefix Gatwy is served under, '/' at
 // root. Never '/' under a prefix — that would hand the Gatwy session/trusted-device cookie
-// to every other app sharing the domain (and the browser won't attach it back to requests
-// made under a different Path anyway, e.g. the OIDC state cookie below).
+// to every other app sharing the domain
 function cookieScopePath(): string {
   return config.basePathPrefix || '/';
 }
