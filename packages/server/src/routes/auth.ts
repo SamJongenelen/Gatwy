@@ -98,6 +98,14 @@ setInterval(() => {
 const TRUSTED_DEVICE_COOKIE = 'gatwy_trusted_device';
 const TRUSTED_DEVICE_DAYS = 30;
 
+// Cookie Path attribute: scoped to the reverse-proxy prefix Gatwy is served under, '/' at
+// root. Never '/' under a prefix — that would hand the Gatwy session/trusted-device cookie
+// to every other app sharing the domain (and the browser won't attach it back to requests
+// made under a different Path anyway, e.g. the OIDC state cookie below).
+function cookieScopePath(): string {
+  return config.basePathPrefix || '/';
+}
+
 function isTrustedDevice(req: Request, userId: string): boolean {
   const cookieVal: string | undefined = req.cookies?.[TRUSTED_DEVICE_COOKIE];
   if (!cookieVal) return false;
@@ -136,7 +144,7 @@ function setTrustedDevice(req: Request, res: Response, userId: string): void {
     secure: true,
     sameSite: 'lax',
     maxAge: TRUSTED_DEVICE_DAYS * 24 * 60 * 60 * 1000,
-    path: '/',
+    path: cookieScopePath(),
   });
 }
 
@@ -208,7 +216,7 @@ function setAuthCookie(res: Response, token: string, maxSessionMinutes?: number)
     secure: true,
     sameSite: 'strict',
     maxAge: maxAgeMs,
-    path: '/',
+    path: cookieScopePath(),
   });
 }
 
@@ -718,7 +726,7 @@ router.post('/logout', authRequired, (req: Request, res: Response) => {
     target: req.user!.username,
     ipAddress: req.ip,
   });
-  res.clearCookie('gatwy_token', { path: '/', secure: true, sameSite: 'strict' });
+  res.clearCookie('gatwy_token', { path: cookieScopePath(), secure: true, sameSite: 'strict' });
   res.json({ ok: true });
 });
 
@@ -821,7 +829,7 @@ router.post('/login/ldap', async (req: Request, res: Response) => {
 });
 
 const OIDC_STATE_COOKIE = 'gatwy_oidc_state';
-const OIDC_STATE_COOKIE_PATH = '/api/v1/auth/oidc';
+const OIDC_STATE_COOKIE_PATH = `${config.basePathPrefix}/api/v1/auth/oidc`;
 
 function stateMatchesCookie(state: string, cookie: unknown): boolean {
   if (typeof cookie !== 'string') return false;
@@ -865,24 +873,24 @@ router.get('/oidc/callback', async (req: Request, res: Response) => {
 
   if (error) {
     const msg = encodeURIComponent(error_description ?? error ?? 'OIDC error');
-    res.redirect(`/?sso_error=${msg}`);
+    res.redirect(`${config.basePathPrefix}/?sso_error=${msg}`);
     return;
   }
 
   if (!code || !state) {
-    res.redirect('/?sso_error=missing_params');
+    res.redirect(`${config.basePathPrefix}/?sso_error=missing_params`);
     return;
   }
 
   if (!stateMatchesCookie(state, stateCookie)) {
     console.error('[OIDC] State does not match the browser that started the flow');
-    res.redirect('/?sso_error=auth_failed');
+    res.redirect(`${config.basePathPrefix}/?sso_error=auth_failed`);
     return;
   }
 
   const oidcUser = await handleOidcCallback(code, state);
   if (!oidcUser) {
-    res.redirect('/?sso_error=auth_failed');
+    res.redirect(`${config.basePathPrefix}/?sso_error=auth_failed`);
     return;
   }
 
@@ -908,7 +916,7 @@ router.get('/oidc/callback', async (req: Request, res: Response) => {
     ipAddress: req.ip,
   });
 
-  res.redirect('/?sso=success');
+  res.redirect(`${config.basePathPrefix}/?sso=success`);
 });
 
 // POST /ldap/test — admin-only endpoint to verify LDAP connectivity

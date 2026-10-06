@@ -21,6 +21,11 @@ describe('injectGatwyMoonlightChrome', () => {
     const twice = injectGatwyMoonlightChrome(once);
     assert.equal(once, twice);
   });
+
+  it('prefixes the overlay stylesheet with BASE_PATH behind a reverse-proxy prefix', () => {
+    const html = injectGatwyMoonlightChrome(STREAM_HTML, '/sys/ftp');
+    assert.match(html, /href="\/sys\/ftp\/moonlight-overlay\.css"/);
+  });
 });
 
 describe('shouldThemeMoonlightHtml', () => {

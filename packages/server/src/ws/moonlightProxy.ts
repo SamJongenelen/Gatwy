@@ -128,7 +128,7 @@ export function setupMoonlightProxy(server: Server, app: import('express').Expre
         const chunks: Buffer[] = [];
         proxyRes.on('data', (chunk) => chunks.push(chunk));
         proxyRes.on('end', () => {
-          const html = injectGatwyMoonlightChrome(Buffer.concat(chunks).toString('utf8'));
+          const html = injectGatwyMoonlightChrome(Buffer.concat(chunks).toString('utf8'), basePath);
           const body = Buffer.from(html, 'utf8');
           outHeaders['content-length'] = body.length;
           res.writeHead(proxyRes.statusCode ?? 502, outHeaders);

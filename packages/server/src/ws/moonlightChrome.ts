@@ -1,6 +1,7 @@
 const MARKER = 'data-gatwy-moonlight-chrome';
 
-const HEAD_SNIPPET = `<link rel="stylesheet" href="/moonlight-overlay.css" ${MARKER}>
+function headSnippet(basePath: string): string {
+  return `<link rel="stylesheet" href="${basePath}/moonlight-overlay.css" ${MARKER}>
 <script ${MARKER}>
 (function () {
   try {
@@ -19,14 +20,22 @@ const HEAD_SNIPPET = `<link rel="stylesheet" href="/moonlight-overlay.css" ${MAR
 })();
 </script>
 `;
+}
 
-/** Rewrite proxied moonlight-web HTML so the stream HUD uses Gatwy chrome. */
-export function injectGatwyMoonlightChrome(html: string): string {
+/**
+ * Rewrite proxied moonlight-web HTML so the stream HUD uses Gatwy chrome.
+ * `basePath` is the reverse-proxy prefix Gatwy is served under ('' at root, see
+ * config.ts#basePathPrefix) — the injected stylesheet is served by Gatwy's own static
+ * mount, not moonlight-web's, so it must be prefixed the same way the SPA's own
+ * root-absolute asset references are (see services/indexHtml.ts).
+ */
+export function injectGatwyMoonlightChrome(html: string, basePath = ''): string {
   if (html.includes(MARKER)) return html;
+  const snippet = headSnippet(basePath);
   if (html.includes('</head>')) {
-    return html.replace('</head>', `${HEAD_SNIPPET}</head>`);
+    return html.replace('</head>', `${snippet}</head>`);
   }
-  return HEAD_SNIPPET + html;
+  return snippet + html;
 }
 
 export function shouldThemeMoonlightHtml(urlPath: string): boolean {
